@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+**/target
+contracts/target
+.git
+.env
+.env.*
+!.env.example
+.turbo
+**/.turbo
+.pgdata
+*.log
+**/*.tsbuildinfo
+apps/console/dist

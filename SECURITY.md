@@ -70,15 +70,31 @@ before real funds are at risk on mainnet:
   Transit (AppRole login with automatic token renewal, request timeouts and retries, and a local
   check of every signature against the key's public key) and AWS KMS envelope encryption for this.
   The `local` mode (raw secret) throws when `NODE_ENV=production`.
-- Real per-asset issuer-signature verification on price publishes, on-chain
-  (`PriceGuard::publish_nav`'s `ed25519_verify`, `require_nav_signature` left at its default
-  `true`) and off-chain (`services/price-guard/src/navSignature.ts`).
+- Signed NAV on price publishes, verified on-chain (`PriceGuard::publish_nav`'s `ed25519_verify`,
+  `require_nav_signature` left at its default `true`) and checked off-chain
+  (`services/price-guard/src/navSignature.ts`). Issuers publish NAV as plain unsigned data, so the
+  signer is Ballast's own price-publisher key: the signature proves who relayed a value, not that the
+  issuer attested it. It must not be described as issuer attestation.
 - Mainnet draw caps, fork/adversarial-fuzz testing against the Price Guard logic (including a
   replay of the 2026-02-22 USTRY-style manipulation this contract exists to prevent — see
   `contracts/price-guard/src/lib.rs`'s module doc comment), monthly incident drills, and a funded
   bug bounty from mainnet launch, scoped to the contracts and Price Guard.
 
-None of that is in place yet — this repo is at the "real code, real testnet deployment, unaudited"
+Controls that do exist in the code today (each has tests; none replaces the audits above):
+
+- **Sessions**: HS256 only, issuer/audience/`jti` checked, `ENABLE_DEV_LOGIN` refuses to start in production.
+- **Institution API keys**: stored encrypted, requests signed over method, path, query and the body's
+  hash with a timestamp and a single-use nonce; keys are managed only with a session; failed attempts are
+  rate-limited per address.
+- **Webhooks**: per-subscription secrets (encrypted at rest), timestamped signatures, retries with a
+  dead-letter queue, and an SSRF guard on subscription and again before every delivery.
+- **Compliance gate**: KYB status and an OFAC SDN screen in front of the routes that take on risk
+  (`services/api/README.md`); it fails closed when the list cannot be loaded.
+- **Network safety**: a service refuses to start when `STELLAR_NETWORK` and the passphrase disagree.
+- **Contracts**: the trust model and deliberate limits are written up in
+  [`contracts/AUDIT_NOTES.md`](contracts/AUDIT_NOTES.md).
+
+None of the pre-mainnet list above is in place yet — this repo is at the "real code, real testnet deployment, unaudited"
 stage, not the "ready for real funds" stage. If you're evaluating whether to rely on this in
 production: don't, yet.
 

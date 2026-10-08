@@ -1,0 +1,19 @@
+# TLS certificates are obtained and renewed automatically for the two domains below.
+# Set API_DOMAIN and CONSOLE_DOMAIN in the compose environment.
+
+{$API_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy api:3000
+}
+
+{$CONSOLE_DOMAIN} {
+	encode zstd gzip
+	root * /srv
+	try_files {path} /index.html
+	file_server
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+}

@@ -1,0 +1,118 @@
+# A single-host deployment: Postgres, a one-shot migration, the services that make the price layer
+# and the public page work, and Caddy for TLS. See deploy/README.md.
+#
+#   cp deploy/.env.prod.example deploy/.env.prod   # then fill it in
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod up -d --build
+
+x-service: &service
+  build:
+    context: ..
+    target: service
+  restart: unless-stopped
+  env_file: .env.prod
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  environment:
+    NODE_ENV: production
+    DATABASE_URL: postgres://ballast:${POSTGRES_PASSWORD}@postgres:5432/ballast
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ballast
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ballast
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ballast -d ballast"]
+      interval: 5s
+      retries: 20
+
+  migrate:
+    <<: *service
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "pnpm --filter @ballast/db migrate"]
+
+  api:
+    <<: *service
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://ballast:${POSTGRES_PASSWORD}@postgres:5432/ballast
+      SERVICE: api
+      API_PORT: "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      retries: 5
+
+  price-guard:
+    <<: *service
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://ballast:${POSTGRES_PASSWORD}@postgres:5432/ballast
+      SERVICE: price-guard
+
+  indexer:
+    <<: *service
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://ballast:${POSTGRES_PASSWORD}@postgres:5432/ballast
+      SERVICE: indexer
+
+  # Lending-side workers. Leave these out of the first (price-layer only) deployment.
+  keeper:
+    <<: *service
+    profiles: ["lending"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://ballast:${POSTGRES_PASSWORD}@postgres:5432/ballast
+      SERVICE: keeper
+
+  margin-monitor:
+    <<: *service
+    profiles: ["lending"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://ballast:${POSTGRES_PASSWORD}@postgres:5432/ballast
+      SERVICE: margin-monitor
+
+  ledger:
+    <<: *service
+    profiles: ["lending"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://ballast:${POSTGRES_PASSWORD}@postgres:5432/ballast
+      SERVICE: ledger
+
+  # Caddy with the built console baked in: serves the static console on CONSOLE_DOMAIN and proxies
+  # the API on API_DOMAIN, with certificates obtained and renewed automatically.
+  caddy:
+    build:
+      context: ..
+      target: console
+      args:
+        VITE_API_URL: https://${API_DOMAIN}
+        VITE_STELLAR_NETWORK_PASSPHRASE: ${STELLAR_NETWORK_PASSPHRASE}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN}
+      CONSOLE_DOMAIN: ${CONSOLE_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  caddy_data:
