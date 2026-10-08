@@ -10,6 +10,7 @@ export type { KmsSigner, SubmitResult } from "./types.js";
 export { submitSignedTx } from "./submit.js";
 
 export { createRawSecretSigner, LocalDevSecretKeySigner } from "./localDevSigner.js";
+export { VaultAuth } from "./vaultClient.js";
 export { VaultTransitSigner, type VaultTransitSignerOptions } from "./vaultTransitSigner.js";
 export { KmsEnvelopeSigner, type KmsEnvelopeSignerOptions } from "./kmsEnvelopeSigner.js";
 

@@ -49,13 +49,27 @@ export async function createOperatorSigner(
 
   switch (mode) {
     case "local": {
+      if (env.NODE_ENV === "production") {
+        throw new Error(
+          `operator-signing: ${prefix}_SIGNER_MODE=local keeps a raw secret in an environment variable and is refused when NODE_ENV=production; use "vault" or "kms-envelope"`,
+        );
+      }
       return new LocalDevSecretKeySigner(LOCAL_SECRET_ENV_VAR[role], networkPassphrase, env);
     }
     case "vault": {
       const vaultAddr = requireEnv("VAULT_ADDR", env);
-      const vaultToken = requireEnv("VAULT_TOKEN", env);
       const keyName = requireEnv(`${prefix}_VAULT_KEY_NAME`, env);
-      const signer = new VaultTransitSigner({ vaultAddr, vaultToken, keyName, networkPassphrase });
+      // AppRole is preferred: the signer then renews its own token. A bare VAULT_TOKEN cannot be renewed.
+      const appRole = env.VAULT_ROLE_ID && env.VAULT_SECRET_ID;
+      const signer = new VaultTransitSigner({
+        vaultAddr,
+        ...(appRole
+          ? { roleId: env.VAULT_ROLE_ID, secretId: env.VAULT_SECRET_ID }
+          : { vaultToken: requireEnv("VAULT_TOKEN", env) }),
+        namespace: env.VAULT_NAMESPACE || undefined,
+        keyName,
+        networkPassphrase,
+      });
       await signer.resolvePublicKey();
       return signer;
     }

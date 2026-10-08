@@ -57,6 +57,9 @@ export class KmsEnvelopeSigner implements KmsSigner {
     }
 
     const secret = Buffer.from(plaintext).toString("utf8").trim();
+    // Shrink the exposure window: the buffers KMS handed back are no longer needed once the
+    // signer holds the key. (The string above and the signer's own copy can't be wiped from JS.)
+    plaintext.fill(0);
     const inner = createRawSecretSigner(secret, options.networkPassphrase);
     return new KmsEnvelopeSigner(inner);
   }

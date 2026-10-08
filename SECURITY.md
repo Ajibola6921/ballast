@@ -67,8 +67,9 @@ before real funds are at risk on mainnet:
   step, done via the account's own signer thresholds.)
 - Operator keys (keeper, price publisher, payout-hop) held in a real KMS, never a raw secret in an
   environment variable — see `packages/operator-signing`, which already supports HashiCorp Vault
-  Transit and AWS/GCP KMS envelope encryption for this; the `local` mode (raw secret) is gated to
-  never run when `NODE_ENV=production`.
+  Transit (AppRole login with automatic token renewal, request timeouts and retries, and a local
+  check of every signature against the key's public key) and AWS KMS envelope encryption for this.
+  The `local` mode (raw secret) throws when `NODE_ENV=production`.
 - Real per-asset issuer-signature verification on price publishes, on-chain
   (`PriceGuard::publish_nav`'s `ed25519_verify`, `require_nav_signature` left at its default
   `true`) and off-chain (`services/price-guard/src/navSignature.ts`).

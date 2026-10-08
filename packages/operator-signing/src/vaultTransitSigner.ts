@@ -7,8 +7,9 @@
  * Configured via the shared `VAULT_ADDR` + `VAULT_TOKEN` env vars and a per-role
  * `${ROLE_ENV_PREFIX}_VAULT_KEY_NAME` naming the Transit key (see `factory.ts`).
  */
-import { StrKey, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Keypair, StrKey, TransactionBuilder } from "@stellar/stellar-sdk";
 import type { KmsSigner } from "./types.js";
+import { VaultAuth, vaultFetch } from "./vaultClient.js";
 
 interface VaultTransitKeyResponse {
   data: {
@@ -25,11 +26,18 @@ interface VaultTransitSignResponse {
 
 export interface VaultTransitSignerOptions {
   vaultAddr: string;
-  vaultToken: string;
+  /** A pre-issued token (never renewed). Prefer AppRole credentials for a long-running service. */
+  vaultToken?: string;
+  /** AppRole credentials; the signer logs in, renews the token and logs in again if it is rejected. */
+  roleId?: string;
+  secretId?: string;
+  namespace?: string;
   keyName: string;
   networkPassphrase: string;
   /** Overridable for tests; defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
+  /** Base delay between retries; overridable for tests. */
+  retryDelayMs?: number;
 }
 
 /** Vault Transit signatures come back as `"vault:v<version>:<base64>"` — strip that prefix. */
@@ -42,19 +50,26 @@ function stripVaultSignaturePrefix(signature: string): string {
 }
 
 export class VaultTransitSigner implements KmsSigner {
-  private readonly vaultAddr: string;
-  private readonly vaultToken: string;
+  private readonly auth: VaultAuth;
+  private readonly retryDelayMs: number | undefined;
   private readonly keyName: string;
   private readonly networkPassphrase: string;
   private readonly fetchImpl: typeof fetch;
   private cachedPublicKey: string | undefined;
 
   constructor(options: VaultTransitSignerOptions) {
-    this.vaultAddr = options.vaultAddr.replace(/\/+$/, "");
-    this.vaultToken = options.vaultToken;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.retryDelayMs = options.retryDelayMs;
+    this.auth = new VaultAuth({
+      vaultAddr: options.vaultAddr,
+      token: options.vaultToken,
+      roleId: options.roleId,
+      secretId: options.secretId,
+      namespace: options.namespace,
+      fetchImpl: this.fetchImpl,
+    });
     this.keyName = options.keyName;
     this.networkPassphrase = options.networkPassphrase;
-    this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
   /**
@@ -66,9 +81,7 @@ export class VaultTransitSigner implements KmsSigner {
     if (this.cachedPublicKey) {
       return this.cachedPublicKey;
     }
-    const res = await this.fetchImpl(`${this.vaultAddr}/v1/transit/keys/${this.keyName}`, {
-      headers: { "X-Vault-Token": this.vaultToken },
-    });
+    const res = await this.call(`/v1/transit/keys/${this.keyName}`);
     if (!res.ok) {
       throw new Error(
         `operator-signing: Vault Transit key lookup failed for "${this.keyName}": ${res.status} ${await res.text()}`,
@@ -96,11 +109,14 @@ export class VaultTransitSigner implements KmsSigner {
     return this.cachedPublicKey;
   }
 
+  private call(path: string, init: { method?: string; body?: string } = {}): Promise<Response> {
+    return vaultFetch(this.auth, path, init, this.fetchImpl, { retryDelayMs: this.retryDelayMs });
+  }
+
   /** Posts `input` (raw bytes) to Vault Transit and returns the detached signature, base64. */
   private async transitSign(input: Uint8Array): Promise<string> {
-    const res = await this.fetchImpl(`${this.vaultAddr}/v1/transit/sign/${this.keyName}`, {
+    const res = await this.call(`/v1/transit/sign/${this.keyName}`, {
       method: "POST",
-      headers: { "X-Vault-Token": this.vaultToken, "content-type": "application/json" },
       body: JSON.stringify({ input: Buffer.from(input).toString("base64") }),
     });
     if (!res.ok) {
@@ -112,15 +128,31 @@ export class VaultTransitSigner implements KmsSigner {
     return stripVaultSignaturePrefix(body.data.signature);
   }
 
+  /**
+   * Checks a signature Vault returned against the public key this signer reports. A mismatch
+   * (a rotated key, the wrong key name, a corrupted response) would otherwise surface only as an
+   * on-chain rejection after the transaction was already sent.
+   */
+  private verified(message: Uint8Array, signatureBase64: string): Buffer {
+    const signature = Buffer.from(signatureBase64, "base64");
+    if (!Keypair.fromPublicKey(this.publicKey()).verify(Buffer.from(message), signature)) {
+      throw new Error(
+        `operator-signing: Vault Transit key "${this.keyName}" returned a signature that does not verify against ${this.publicKey()}`,
+      );
+    }
+    return signature;
+  }
+
   async sign(unsignedXdr: string): Promise<string> {
     const publicKey = await this.resolvePublicKey();
     const tx = TransactionBuilder.fromXDR(unsignedXdr, this.networkPassphrase);
-    tx.addSignature(publicKey, await this.transitSign(tx.hash()));
+    const hash = tx.hash();
+    tx.addSignature(publicKey, this.verified(hash, await this.transitSign(hash)).toString("base64"));
     return tx.toXDR();
   }
 
   async signMessage(message: Uint8Array): Promise<Buffer> {
     await this.resolvePublicKey();
-    return Buffer.from(await this.transitSign(message), "base64");
+    return this.verified(message, await this.transitSign(message));
   }
 }
