@@ -12,12 +12,9 @@ import { normalizeContractValue } from "./scval.js";
 
 /**
  * Read-only contract calls (`asset`, `guardedPrice`, `ltv`, `quote`, ...) are simulated, not
- * submitted, so they don't need a real signer — but Soroban's `simulateTransaction` still needs
- * *some* existing account to build the envelope against. Per the task spec: "read calls currently
- * need STELLAR_SIMULATION_SOURCE env var pointing at any existing account." This is a documented
- * limitation of this skeleton, not a design choice — a future pass could special-case a
- * well-known dummy account once we confirm the RPC simulation path tolerates one that has never
- * been funded.
+ * submitted, so they need no signer. `simulateRead` builds the envelope against a zero-sequence
+ * account object (no ledger lookup), so the source only has to be a valid G-address; it need not
+ * exist or be funded. It is read from STELLAR_SIMULATION_SOURCE.
  */
 export function resolveSimulationSource(env: NodeJS.ProcessEnv = process.env): string {
   const source = env.STELLAR_SIMULATION_SOURCE;
@@ -88,8 +85,8 @@ export const buildUnsignedInvocation = buildUnsignedTx;
 
 /**
  * Simulates a read-only contract call and decodes the return value, without building a
- * submittable transaction. `callerPublicKey` only needs to be a funded account that exists on
- * the target network — it never signs or pays for anything.
+ * submittable transaction. `callerPublicKey` is only the envelope's source: the transaction is
+ * never submitted, so the account need not exist on the target network (sequence 0 is used).
  */
 export async function simulateRead<T = unknown>(
   config: NetworkConfig,
@@ -99,7 +96,7 @@ export async function simulateRead<T = unknown>(
   scArgs: xdr.ScVal[],
 ): Promise<T> {
   const server = new rpc.Server(config.rpcUrl, { allowHttp: config.rpcUrl.startsWith("http://") });
-  const sourceAccount = await server.getAccount(callerPublicKey);
+  const sourceAccount = new Account(callerPublicKey, "0");
 
   const tx = new TransactionBuilder(sourceAccount, {
     fee: BASE_FEE,
