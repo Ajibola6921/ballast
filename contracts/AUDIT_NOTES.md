@@ -19,13 +19,26 @@ uses comes from the contract's own state or from the PriceGuard, never from a ke
 ## PriceGuard
 
 - The guarded price is the median of fresh sources. Fewer than two fresh sources is `Degraded`;
-  disagreement beyond `band_bps` is `Degraded`; a move beyond `daily_move_band_bps` is a sticky
-  `Halted` that only `risk` clears.
+  disagreement beyond `band_bps` is `Degraded`; a move beyond `daily_move_band_bps` against the last
+  good value is a sticky `Halted` that only `risk` clears.
+- **The guard is evaluated and persisted on every publish**, not only when something reads it. A
+  Soroban read is a simulation and stores nothing, so evaluating only on reads meant the halt latch
+  and the `LastGood` baseline moved only when an unrelated transaction happened to call
+  `guarded_price`: the baseline went days stale and ordinary yield drift eventually looked like a
+  jump. Now each publish re-runs the rules, so a jump latches at once and the baseline follows slow
+  drift. Consequence: `daily_move_band_bps` bounds the change **between consecutive evaluations**
+  (minutes apart with the default publisher), a stricter reading than "per day". After a long outage
+  a real move larger than the band halts on the first publish and needs `confirm_halt_cleared`.
+- A reading is rejected at publish if its price is not positive or its timestamp is more than
+  `MAX_FUTURE_SKEW_S` (60s) ahead of the ledger, and a future-dated reading is never "fresh". Before
+  this, `now.saturating_sub(observed_at)` made any future timestamp look zero seconds old, so a unit
+  mix-up (milliseconds for seconds) or a skewed clock could pin a value as current indefinitely.
 - NAV is signed by the **price publisher's** key (`configure_issuer_key` registers it), because
-  issuers publish unsigned data. The signature therefore proves "Ballast's publisher read this from
-  the issuer's API", not "the issuer attested it". Do not describe it as issuer attestation.
-- `max_staleness_s` is per deployment; RedStone's RWA feeds update every 1-2 hours, so values under
-  that make the guard refuse to lend.
+  issuers publish unsigned data. The attestor key is the same key that is authorised to publish, so
+  on-chain the signature adds no protection against a compromised publisher: it records who relayed
+  the value. Do not describe it as issuer attestation.
+- `max_staleness_s` is per asset; RedStone's RWA feeds update every 1-2 hours, so values under that
+  make the guard refuse to lend.
 
 ## CreditLine
 

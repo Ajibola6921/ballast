@@ -217,7 +217,27 @@ fn read_all_sources(env: &Env, asset: &Address) -> Vec<PriceSource> {
 }
 
 fn is_fresh(env: &Env, source: &PriceSource, max_staleness_s: u64) -> bool {
-    !source.stale && env.ledger().timestamp().saturating_sub(source.observed_at) <= max_staleness_s
+    let now = env.ledger().timestamp();
+    // A reading dated in the future is not "zero seconds old": `saturating_sub` would otherwise
+    // report it fresh until the clock caught up, letting a bad timestamp (a unit mix-up, a skewed
+    // issuer clock, a compromised publisher) pin a value as current for as long as it likes.
+    !source.stale
+        && source.observed_at <= now.saturating_add(MAX_FUTURE_SKEW_S)
+        && now.saturating_sub(source.observed_at) <= max_staleness_s
+}
+
+/// How far ahead of the ledger clock a reading's timestamp may be (clock skew between the
+/// publisher, the issuer and the network).
+pub const MAX_FUTURE_SKEW_S: u64 = 60;
+
+/// Rejects a reading that cannot be a price: non-positive, or dated further ahead than clock skew
+/// explains.
+fn require_sane_reading(env: &Env, value: i128, ts: u64) {
+    assert!(value > 0, "price-guard: price must be positive");
+    assert!(
+        ts <= env.ledger().timestamp().saturating_add(MAX_FUTURE_SKEW_S),
+        "price-guard: reading is dated in the future"
+    );
 }
 
 /// A tiny fixed-capacity insertion sort over `Vec<i128>` without pulling in `alloc` (this crate is
@@ -279,6 +299,114 @@ fn within_band(values: &[i128], band_bps: u32) -> bool {
     }
     let deviation_bps = ((max - min) * 10_000) / min;
     deviation_bps <= band_bps as i128
+}
+
+/// The PRD §6.4 rules, evaluated against the sources as they stand, writing back what the result
+/// implies: a `Halted` latch (with the value that caused it) or the new `LastGood` baseline.
+///
+/// Run on **every publish** as well as on every `guarded_price` call. A Soroban read is a
+/// simulation and persists nothing, so if only reads evaluated the guard, the latch would never
+/// stick and the baseline would never move until some unrelated transaction happened to call it;
+/// the daily-move check would then compare against a baseline days old and halt on ordinary yield
+/// drift. Evaluating at publish time keeps the baseline current and makes a jump latch at once.
+fn evaluate(env: &Env, asset: Address) -> GuardedPrice {
+    let config = read_config(&env, &asset);
+    let all_sources = read_all_sources(&env, &asset);
+
+    let mut fresh_values: soroban_sdk::Vec<i128> = soroban_sdk::Vec::new(&env);
+    let mut fresh_sources: soroban_sdk::Vec<PriceSource> = soroban_sdk::Vec::new(&env);
+    for source in all_sources.iter() {
+        if is_fresh(&env, &source, config.max_staleness_s) {
+            fresh_values.push_back(source.value);
+            fresh_sources.push_back(source.clone());
+        }
+    }
+
+    let last_good: Option<i128> = env
+        .storage()
+        .instance()
+        .get(&DataKey::LastGood(asset.clone()));
+    let already_halted: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Halted(asset.clone()))
+        .unwrap_or(false);
+
+    let now = env.ledger().timestamp();
+
+    if already_halted {
+        return GuardedPrice {
+            asset,
+            value: last_good.unwrap_or(0),
+            status: PriceStatus::Halted,
+            ts: now,
+            sources: fresh_sources,
+        };
+    }
+
+    if fresh_values.len() < 2 {
+        return GuardedPrice {
+            asset,
+            value: last_good.unwrap_or(0),
+            status: PriceStatus::Degraded,
+            ts: now,
+            sources: fresh_sources,
+        };
+    }
+
+    let mut plain_values: alloc_free_sort::SortBuf =
+        alloc_free_sort::SortBuf::from(&fresh_values);
+    plain_values.sort();
+    let len = plain_values.len();
+    let median_value = plain_values.get(len / 2);
+
+    let mut as_array: [i128; 8] = [0; 8];
+    for (i, slot) in as_array.iter_mut().enumerate().take(len) {
+        *slot = plain_values.get(i);
+    }
+    if !within_band(&as_array[..len], config.band_bps) {
+        return GuardedPrice {
+            asset,
+            value: last_good.unwrap_or(0),
+            status: PriceStatus::Degraded,
+            ts: now,
+            sources: fresh_sources,
+        };
+    }
+
+    if let Some(last) = last_good {
+        if last > 0 {
+            let move_bps = (((median_value - last).abs()) * 10_000) / last;
+            if move_bps > config.daily_move_band_bps as i128 {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Halted(asset.clone()), &true);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::PendingHaltValue(asset.clone()), &median_value);
+                return GuardedPrice {
+                    asset,
+                    value: last,
+                    status: PriceStatus::Halted,
+                    ts: now,
+                    sources: fresh_sources,
+                };
+            }
+        }
+    }
+
+    env.storage()
+        .instance()
+        .set(&DataKey::LastGood(asset.clone()), &median_value);
+
+    GuardedPrice {
+        asset,
+        value: median_value,
+        status: PriceStatus::Ok,
+        ts: now,
+        sources: fresh_sources,
+    }
+
 }
 
 #[contract]
@@ -373,6 +501,7 @@ impl PriceGuard {
         publisher.require_auth();
         access::require_price_publisher(&env);
         read_config(&env, &asset); // asserts the asset is configured
+        require_sane_reading(&env, value, ts);
 
         if require_nav_signature(&env) {
             let issuer_pubkey: BytesN<32> = env
@@ -394,6 +523,7 @@ impl PriceGuard {
         let name = Symbol::new(&env, ISSUER_SOURCE);
         track_source_name(&env, &asset, &name);
         write_source(&env, &asset, &name, value, ts);
+        evaluate(&env, asset);
     }
 
     /// PRD §6.4's other inputs: the independent SEP-40 feed and the last observed redemption
@@ -410,9 +540,11 @@ impl PriceGuard {
         publisher.require_auth();
         access::require_price_publisher(&env);
         read_config(&env, &asset);
+        require_sane_reading(&env, value, ts);
 
         track_source_name(&env, &asset, &source);
         write_source(&env, &asset, &source, value, ts);
+        evaluate(&env, asset);
     }
 
     /// The core PRD §6.4 rules, run fresh on every call:
@@ -422,102 +554,7 @@ impl PriceGuard {
     ///    good value -> `Halted` (sticky, until `confirm_halt_cleared`), value = last good.
     /// 4. Otherwise -> `Ok`, value = the new median, and this becomes the new "last good".
     pub fn guarded_price(env: Env, asset: Address) -> GuardedPrice {
-        let config = read_config(&env, &asset);
-        let all_sources = read_all_sources(&env, &asset);
-
-        let mut fresh_values: soroban_sdk::Vec<i128> = soroban_sdk::Vec::new(&env);
-        let mut fresh_sources: soroban_sdk::Vec<PriceSource> = soroban_sdk::Vec::new(&env);
-        for source in all_sources.iter() {
-            if is_fresh(&env, &source, config.max_staleness_s) {
-                fresh_values.push_back(source.value);
-                fresh_sources.push_back(source.clone());
-            }
-        }
-
-        let last_good: Option<i128> = env
-            .storage()
-            .instance()
-            .get(&DataKey::LastGood(asset.clone()));
-        let already_halted: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::Halted(asset.clone()))
-            .unwrap_or(false);
-
-        let now = env.ledger().timestamp();
-
-        if already_halted {
-            return GuardedPrice {
-                asset,
-                value: last_good.unwrap_or(0),
-                status: PriceStatus::Halted,
-                ts: now,
-                sources: fresh_sources,
-            };
-        }
-
-        if fresh_values.len() < 2 {
-            return GuardedPrice {
-                asset,
-                value: last_good.unwrap_or(0),
-                status: PriceStatus::Degraded,
-                ts: now,
-                sources: fresh_sources,
-            };
-        }
-
-        let mut plain_values: alloc_free_sort::SortBuf =
-            alloc_free_sort::SortBuf::from(&fresh_values);
-        plain_values.sort();
-        let len = plain_values.len();
-        let median_value = plain_values.get(len / 2);
-
-        let mut as_array: [i128; 8] = [0; 8];
-        for (i, slot) in as_array.iter_mut().enumerate().take(len) {
-            *slot = plain_values.get(i);
-        }
-        if !within_band(&as_array[..len], config.band_bps) {
-            return GuardedPrice {
-                asset,
-                value: last_good.unwrap_or(0),
-                status: PriceStatus::Degraded,
-                ts: now,
-                sources: fresh_sources,
-            };
-        }
-
-        if let Some(last) = last_good {
-            if last > 0 {
-                let move_bps = (((median_value - last).abs()) * 10_000) / last;
-                if move_bps > config.daily_move_band_bps as i128 {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::Halted(asset.clone()), &true);
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::PendingHaltValue(asset.clone()), &median_value);
-                    return GuardedPrice {
-                        asset,
-                        value: last,
-                        status: PriceStatus::Halted,
-                        ts: now,
-                        sources: fresh_sources,
-                    };
-                }
-            }
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey::LastGood(asset.clone()), &median_value);
-
-        GuardedPrice {
-            asset,
-            value: median_value,
-            status: PriceStatus::Ok,
-            ts: now,
-            sources: fresh_sources,
-        }
+        evaluate(&env, asset)
     }
 
     /// SEP-40-shaped alias, so other protocols (Blend, Templar — PRD §14) could eventually consume
@@ -757,5 +794,204 @@ mod test {
         // Signed over a DIFFERENT value than what's actually published -> verification must fail.
         let sig = sign_nav(&env, &signing_key, &code, now, SCALE + 1);
         client.publish_nav(&publisher, &asset, &code, &SCALE, &now, &sig);
+    }
+
+    // --- adversarial cases -------------------------------------------------------------------
+
+    fn feed(env: &Env) -> Symbol {
+        Symbol::new(env, "redston")
+    }
+
+    /// The 2026-02-22 shape: one venue's price is pushed far from reality while the issuer's NAV is
+    /// unchanged. The guard must refuse to call that a price, however big the push.
+    #[test]
+    fn a_manipulated_feed_against_an_unmoved_nav_is_never_ok() {
+        let (env, client, publisher, _risk, asset) = setup(50, 100, 3600);
+        let code = asset_code(&env);
+        let sig = BytesN::from_array(&env, &[0u8; 64]);
+        let now = env.ledger().timestamp();
+        client.publish_nav(&publisher, &asset, &code, &SCALE, &now, &sig);
+        client.publish_source(&publisher, &asset, &feed(&env), &SCALE, &now);
+        assert_eq!(client.guarded_price(&asset).status, PriceStatus::Ok);
+
+        for multiple in [2i128, 10, 100] {
+            client.publish_source(&publisher, &asset, &feed(&env), &(SCALE * multiple), &now);
+            let price = client.guarded_price(&asset);
+            assert_eq!(price.status, PriceStatus::Degraded, "{multiple}x must not be Ok");
+            assert_eq!(price.value, SCALE, "the value stays at the last good price, not the pushed one");
+        }
+    }
+
+    #[test]
+    fn one_fresh_source_can_never_set_a_price_however_large_the_move() {
+        let (env, client, publisher, _risk, asset) = setup(50, 100, 3600);
+        let code = asset_code(&env);
+        let sig = BytesN::from_array(&env, &[0u8; 64]);
+        let now = env.ledger().timestamp();
+        client.publish_nav(&publisher, &asset, &code, &SCALE, &now, &sig);
+        client.publish_source(&publisher, &asset, &feed(&env), &SCALE, &now);
+        assert_eq!(client.guarded_price(&asset).status, PriceStatus::Ok);
+
+        // The NAV goes stale; the attacker keeps pushing the feed. One fresh source is not enough.
+        env.ledger().set_timestamp(now + 7_200);
+        client.publish_source(&publisher, &asset, &feed(&env), &(SCALE * 3), &(now + 7_200));
+        let price = client.guarded_price(&asset);
+        assert_eq!(price.status, PriceStatus::Degraded);
+        assert_eq!(price.value, SCALE);
+    }
+
+    #[test]
+    fn a_jump_both_sources_agree_on_latches_a_halt_at_publish_time() {
+        let (env, client, publisher, risk, asset) = setup(50, 100, 3600);
+        let code = asset_code(&env);
+        let sig = BytesN::from_array(&env, &[0u8; 64]);
+        let now = env.ledger().timestamp();
+        client.publish_nav(&publisher, &asset, &code, &SCALE, &now, &sig);
+        client.publish_source(&publisher, &asset, &feed(&env), &SCALE, &now);
+
+        let jumped = SCALE * 13 / 10; // +30%
+        client.publish_nav(&publisher, &asset, &code, &jumped, &now, &sig);
+        client.publish_source(&publisher, &asset, &feed(&env), &jumped, &now);
+
+        // Nobody has asked for the price yet: the publish itself latched the halt, so a draw that
+        // reads it next sees Halted at the old value.
+        let price = client.guarded_price(&asset);
+        assert_eq!(price.status, PriceStatus::Halted);
+        assert_eq!(price.value, SCALE);
+
+        // A human confirming it was real promotes the new value to the baseline.
+        client.confirm_halt_cleared(&risk, &asset);
+        let price = client.guarded_price(&asset);
+        assert_eq!((price.status, price.value), (PriceStatus::Ok, jumped));
+    }
+
+    /// Yield accrues steadily; the baseline has to follow it or ordinary drift eventually looks like a
+    /// jump. Each step here is under the 1% band, the total is not, and nobody reads the price in between.
+    #[test]
+    fn steady_drift_in_small_steps_never_halts() {
+        let (env, client, publisher, _risk, asset) = setup(50, 100, 3600);
+        let code = asset_code(&env);
+        let sig = BytesN::from_array(&env, &[0u8; 64]);
+        let now = env.ledger().timestamp();
+        let mut value = SCALE;
+        client.publish_nav(&publisher, &asset, &code, &value, &now, &sig);
+        client.publish_source(&publisher, &asset, &feed(&env), &value, &now);
+
+        for _ in 0..4 {
+            value = value * 1_006 / 1_000; // +0.6% per step, +2.4% in total
+            client.publish_nav(&publisher, &asset, &code, &value, &now, &sig);
+            client.publish_source(&publisher, &asset, &feed(&env), &value, &now);
+        }
+
+        let price = client.guarded_price(&asset);
+        assert_eq!(price.status, PriceStatus::Ok, "drift in small steps must not halt");
+        assert_eq!(price.value, value);
+    }
+
+    #[test]
+    fn a_future_dated_reading_is_rejected_and_never_counts_as_fresh() {
+        let (env, client, publisher, _risk, asset) = setup(50, 100, 3600);
+        let code = asset_code(&env);
+        let sig = BytesN::from_array(&env, &[0u8; 64]);
+        env.ledger().set_timestamp(10_000);
+        let now = env.ledger().timestamp();
+
+        // Within clock skew is fine.
+        client.publish_nav(&publisher, &asset, &code, &SCALE, &(now + MAX_FUTURE_SKEW_S), &sig);
+
+        // Beyond it is refused outright (a ms-for-s mix-up lands here).
+        let far = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.publish_source(&publisher, &asset, &feed(&env), &SCALE, &(now * 1_000));
+        }));
+        assert!(far.is_err(), "a timestamp in the far future must be refused");
+    }
+
+    #[test]
+    fn a_reading_that_ages_into_staleness_stops_counting() {
+        let (env, client, publisher, _risk, asset) = setup(50, 100, 3600);
+        let code = asset_code(&env);
+        let sig = BytesN::from_array(&env, &[0u8; 64]);
+        let now = env.ledger().timestamp();
+        client.publish_nav(&publisher, &asset, &code, &SCALE, &now, &sig);
+        client.publish_source(&publisher, &asset, &feed(&env), &SCALE, &now);
+        assert_eq!(client.guarded_price(&asset).status, PriceStatus::Ok);
+
+        env.ledger().set_timestamp(now + 3_601);
+        assert_eq!(client.guarded_price(&asset).status, PriceStatus::Degraded);
+    }
+
+    #[test]
+    fn a_zero_or_negative_price_is_refused() {
+        let (env, client, publisher, _risk, asset) = setup(50, 100, 3600);
+        let code = asset_code(&env);
+        let sig = BytesN::from_array(&env, &[0u8; 64]);
+        let now = env.ledger().timestamp();
+        for bad in [0i128, -SCALE] {
+            let nav = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.publish_nav(&publisher, &asset, &code, &bad, &now, &sig);
+            }));
+            let src = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.publish_source(&publisher, &asset, &feed(&env), &bad, &now);
+            }));
+            assert!(nav.is_err() && src.is_err(), "{bad} must be refused");
+        }
+    }
+
+    /// With `mock_all_auths` anyone's signature counts, which would hide a missing role check. These
+    /// two tests authorize *only* the stranger, so a call succeeds only if the contract fails to
+    /// demand the stored role's own signature.
+    #[test]
+    fn a_stranger_cannot_publish_a_price_even_naming_themselves_publisher() {
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+        use soroban_sdk::IntoVal;
+        let (env, client, _publisher, _risk, asset) = setup(50, 100, 3600);
+        let stranger = Address::generate(&env);
+        let now = env.ledger().timestamp();
+        let source = feed(&env);
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "publish_source",
+                args: (stranger.clone(), asset.clone(), source.clone(), SCALE, now).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.publish_source(&stranger, &asset, &source, &SCALE, &now);
+        }));
+        assert!(result.is_err(), "only the stored price publisher may publish");
+    }
+
+    #[test]
+    fn a_stranger_cannot_clear_a_halt() {
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+        use soroban_sdk::IntoVal;
+        let (env, client, publisher, _risk, asset) = setup(50, 100, 3600);
+        let code = asset_code(&env);
+        let sig = BytesN::from_array(&env, &[0u8; 64]);
+        let now = env.ledger().timestamp();
+        client.publish_nav(&publisher, &asset, &code, &SCALE, &now, &sig);
+        client.publish_source(&publisher, &asset, &feed(&env), &SCALE, &now);
+        let jumped = SCALE * 2;
+        client.publish_nav(&publisher, &asset, &code, &jumped, &now, &sig);
+        client.publish_source(&publisher, &asset, &feed(&env), &jumped, &now);
+        assert_eq!(client.guarded_price(&asset).status, PriceStatus::Halted);
+
+        let stranger = Address::generate(&env);
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "confirm_halt_cleared",
+                args: (stranger.clone(), asset.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.confirm_halt_cleared(&stranger, &asset);
+        }));
+        assert!(result.is_err(), "only the risk role may clear a halt");
+        assert_eq!(client.guarded_price(&asset).status, PriceStatus::Halted);
     }
 }
