@@ -10,6 +10,12 @@ export interface KmsSigner {
   publicKey(): string;
   /** Signs an unsigned XDR envelope and returns the signed XDR. */
   sign(unsignedXdr: string): Promise<string>;
+  /**
+   * Returns a detached 64-byte Ed25519 signature over `message` made with the same operator key.
+   * Used by price-guard's NAV relay: the on-chain `PriceGuard.publish_nav` verifies this key's
+   * signature over the canonical NAV message (see `services/price-guard/src/navSignature.ts`).
+   */
+  signMessage(message: Uint8Array): Promise<Buffer>;
 }
 
 export interface SubmitResult {

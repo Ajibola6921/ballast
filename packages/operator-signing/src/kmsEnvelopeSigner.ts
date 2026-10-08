@@ -68,4 +68,8 @@ export class KmsEnvelopeSigner implements KmsSigner {
   sign(unsignedXdr: string): Promise<string> {
     return this.inner.sign(unsignedXdr);
   }
+
+  signMessage(message: Uint8Array): Promise<Buffer> {
+    return this.inner.signMessage(message);
+  }
 }

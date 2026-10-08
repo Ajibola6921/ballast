@@ -30,6 +30,9 @@ export function createRawSecretSigner(secret: string, networkPassphrase: string)
       tx.sign(keypair);
       return tx.toXDR();
     },
+    async signMessage(message: Uint8Array): Promise<Buffer> {
+      return Buffer.from(keypair.sign(Buffer.from(message)));
+    },
   };
 }
 
@@ -58,5 +61,9 @@ export class LocalDevSecretKeySigner implements KmsSigner {
 
   sign(unsignedXdr: string): Promise<string> {
     return this.inner.sign(unsignedXdr);
+  }
+
+  signMessage(message: Uint8Array): Promise<Buffer> {
+    return this.inner.signMessage(message);
   }
 }

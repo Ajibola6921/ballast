@@ -96,15 +96,12 @@ export class VaultTransitSigner implements KmsSigner {
     return this.cachedPublicKey;
   }
 
-  async sign(unsignedXdr: string): Promise<string> {
-    const publicKey = await this.resolvePublicKey();
-    const tx = TransactionBuilder.fromXDR(unsignedXdr, this.networkPassphrase);
-    const hash = tx.hash();
-
+  /** Posts `input` (raw bytes) to Vault Transit and returns the detached signature, base64. */
+  private async transitSign(input: Uint8Array): Promise<string> {
     const res = await this.fetchImpl(`${this.vaultAddr}/v1/transit/sign/${this.keyName}`, {
       method: "POST",
       headers: { "X-Vault-Token": this.vaultToken, "content-type": "application/json" },
-      body: JSON.stringify({ input: Buffer.from(hash).toString("base64") }),
+      body: JSON.stringify({ input: Buffer.from(input).toString("base64") }),
     });
     if (!res.ok) {
       throw new Error(
@@ -112,9 +109,18 @@ export class VaultTransitSigner implements KmsSigner {
       );
     }
     const body = (await res.json()) as VaultTransitSignResponse;
-    const signatureBase64 = stripVaultSignaturePrefix(body.data.signature);
+    return stripVaultSignaturePrefix(body.data.signature);
+  }
 
-    tx.addSignature(publicKey, signatureBase64);
+  async sign(unsignedXdr: string): Promise<string> {
+    const publicKey = await this.resolvePublicKey();
+    const tx = TransactionBuilder.fromXDR(unsignedXdr, this.networkPassphrase);
+    tx.addSignature(publicKey, await this.transitSign(tx.hash()));
     return tx.toXDR();
+  }
+
+  async signMessage(message: Uint8Array): Promise<Buffer> {
+    await this.resolvePublicKey();
+    return Buffer.from(await this.transitSign(message), "base64");
   }
 }
