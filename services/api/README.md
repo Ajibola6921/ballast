@@ -72,3 +72,25 @@ A non-2xx answer is retried after 30s, 2m, 10m, 1h and 6h. After the sixth faile
 dead-lettered; see it under `GET /v1/webhooks/subscriptions/:id/deliveries` and requeue it with
 `POST /v1/webhooks/deliveries/:id/redeliver`. Delivery is at least once, so dedupe on
 `x-ballast-delivery`. Redirects are not followed, and URLs that resolve to private addresses are refused.
+
+## Compliance gate
+
+With `COMPLIANCE_ENFORCED=true` (the default in production), these routes refuse a party unless its KYB
+status is `approved` and it has a recent clear sanctions screening: opening a line, funding, pledging,
+drawing, exit quotes and execution, repo proposals and acceptance. A request that names a counterparty
+(the borrower on a new line, the cash borrower on a repo) screens them too. Repaying, releasing,
+withdrawing and unwinding are never gated, so a party can always get out.
+
+Screening checks the party's legal name and every Stellar account it uses against the US Treasury OFAC
+SDN list (names, aliases and published digital-currency addresses). The list is downloaded from OFAC,
+refreshed every 12 hours, and screening fails closed (`503`) if no copy younger than 7 days is available.
+A match records a `compliance_check`, writes `sanctions.match` to the audit log and holds the party
+until a person reviews it. This is a strict name and address screen, so it will miss spelling variants;
+it is a first control, not a substitute for a commercial screening provider.
+
+KYB itself is a person's decision, made outside the API:
+
+```
+pnpm --filter @ballast/db compliance kyb <partyId> approved <provider> <reference>
+pnpm --filter @ballast/db compliance clear <partyId> <reviewer> "reviewed: different entity, same name"
+```

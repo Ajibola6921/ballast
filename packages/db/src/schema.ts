@@ -15,6 +15,7 @@ import {
   jsonb,
   primaryKey,
   uniqueIndex,
+  index,
 } from "drizzle-orm/pg-core";
 
 const money = (name: string) => numeric(name, { precision: 32, scale: 7 });
@@ -351,6 +352,28 @@ export const chainEvent = pgTable(
     ingestedAt: timestamp("ingested_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("chain_event_event_id_uq").on(t.eventId)],
+);
+
+// --- Compliance ---
+
+/** One sanctions screening of a party (its legal name and every Stellar account it uses). A
+ * `match` is a hold: the party is blocked until a person reviews the hit. */
+export const complianceCheck = pgTable(
+  "compliance_check",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    partyId: uuid("party_id")
+      .notNull()
+      .references(() => party.id),
+    kind: text("kind").notNull().default("sanctions"),
+    result: text("result").notNull(),
+    matches: jsonb("matches"),
+    /** Where the list came from and how old it was, so a decision can be reconstructed later. */
+    listSource: text("list_source"),
+    listLoadedAt: timestamp("list_loaded_at", { withTimezone: true }),
+    checkedAt: timestamp("checked_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("compliance_check_party_idx").on(t.partyId, t.checkedAt)],
 );
 
 // --- Institution API keys ---

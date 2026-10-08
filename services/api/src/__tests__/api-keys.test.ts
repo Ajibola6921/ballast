@@ -148,6 +148,7 @@ describe("API-key requests through the server", () => {
     sep10HomeDomain: "localhost", sep10WebAuthDomain: "localhost",
     networkPassphrase: "Test SDF Network ; September 2015",
     webhookSecretKey: SECRET_KEY, apiKeySecretKey: SECRET_KEY, consoleOrigin: "http://localhost:5173",
+ complianceEnforced: false,
   };
   const session = { authorization: `Bearer ${signSessionToken(ACCOUNT, config.jwtSigningSecret)}` };
   const headersFor = (method: string, url: string, body: string, nonce: string) => {

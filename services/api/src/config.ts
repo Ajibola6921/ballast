@@ -29,6 +29,9 @@ export interface ApiConfig {
   /** 32-byte key (64 hex chars) that encrypts institution API-key signing secrets at rest. API
    * keys cannot be created or used while it is unset. */
   apiKeySecretKey: string;
+  /** Whether the KYB and sanctions gate runs in front of risk-taking routes. On by default in
+   * production; off elsewhere so local runs and tests need no network. */
+  complianceEnforced: boolean;
   /** Origin allowed to call this API from a browser (the console app). Passed straight to
    * `@fastify/cors`'s `origin` option — never `*`. */
   consoleOrigin: string;
@@ -73,6 +76,7 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     networkPassphrase: loadNetworkConfig(env).networkPassphrase,
     webhookSecretKey: env.WEBHOOK_SECRET_KEY ?? "",
     apiKeySecretKey: env.API_KEY_SECRET_KEY ?? "",
+    complianceEnforced: env.COMPLIANCE_ENFORCED ? env.COMPLIANCE_ENFORCED === "true" : env.NODE_ENV === "production",
     consoleOrigin: env.CONSOLE_ORIGIN ?? "http://localhost:5173",
   };
 }

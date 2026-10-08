@@ -12,7 +12,8 @@
     "lint": "echo 'no lint configured'",
     "migrate:generate": "drizzle-kit generate",
     "migrate": "tsx --env-file-if-exists=../../.env src/migrate.ts",
-    "seed": "tsx --env-file-if-exists=../../.env src/seed.ts"
+    "seed": "tsx --env-file-if-exists=../../.env src/seed.ts",
+    "compliance": "tsx --env-file-if-exists=../../.env src/complianceCli.ts"
   },
   "dependencies": {
     "@ballast/domain-types": "workspace:*",

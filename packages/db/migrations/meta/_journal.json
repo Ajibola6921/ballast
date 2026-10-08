@@ -50,6 +50,13 @@
       "when": 1791473923842,
       "tag": "0006_party_api_key",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791477325125,
+      "tag": "0007_compliance_check",
+      "breakpoints": true
     }
   ]
 }

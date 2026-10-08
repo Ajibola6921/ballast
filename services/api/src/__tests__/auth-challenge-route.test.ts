@@ -21,6 +21,7 @@ const config: ApiConfig = {
   networkPassphrase: NETWORK_PASSPHRASE,
   webhookSecretKey: "00".repeat(32),
   apiKeySecretKey: "00".repeat(32),
+  complianceEnforced: false,
   consoleOrigin: "http://localhost:5173",
 };
 

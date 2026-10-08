@@ -14,6 +14,8 @@ import { registerAssetRoutes } from "./routes/assets.js";
 import { registerMarketRoutes } from "./routes/markets.js";
 import { registerWebhookRoutes } from "./routes/webhooks.js";
 import { registerApiKeyRoutes } from "./routes/api-keys.js";
+import { registerCompliance } from "./compliance/hook.js";
+import { OfacScreener, type SanctionsScreener } from "./compliance/screener.js";
 import { registerCreditLineRoutes } from "./routes/credit-lines.js";
 import { registerExitRoutes } from "./routes/exit.js";
 import { registerRepoRoutes } from "./routes/repo.js";
@@ -27,6 +29,8 @@ export interface BuildServerOptions {
   db?: Database;
   contracts?: ContractClients;
   chain?: ChainGateway;
+  /** Overridable for tests; defaults to the OFAC SDN screener when compliance is enforced. */
+  screener?: SanctionsScreener;
 }
 
 /**
@@ -69,6 +73,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   });
 
   registerAuth(app, config, db);
+  if (config.complianceEnforced) registerCompliance(app, db, options.screener ?? new OfacScreener());
 
   // GET /v1/assets and /v1/assets/:id/price are public per PRD §9 (no auth required to browse
   // supported assets/prices); everything else needs a resolved partyId.

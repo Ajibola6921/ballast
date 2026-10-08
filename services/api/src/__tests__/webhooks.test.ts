@@ -273,6 +273,7 @@ describe("webhook routes", () => {
     networkPassphrase: "Test SDF Network ; September 2015",
     webhookSecretKey: KEY,
     apiKeySecretKey: "00".repeat(32),
+    complianceEnforced: false,
     consoleOrigin: "http://localhost:5173",
   };
   const ACCOUNT = "GABCDEFTESTACCOUNT";
