@@ -142,6 +142,18 @@ For a long-running shadow run set `PRICE_GUARD_PUBLISH=false` on `services/price
 the real readings and alerts when issuer NAV and oracle disagree by more than the asset's band,
 and sends nothing on-chain.
 
+## Mainnet price layer
+
+`scripts/deploy-mainnet-prices.sh` deploys only `registry` and `price-guard` to mainnet (no funds
+are held by either) and registers the assets in `scripts/shadow-assets.json`, so the public
+live-price page has an on-chain guarded price to show. It does nothing without
+`CONFIRM_MAINNET=deploy-prices`, and `--dry-run` prints every command without sending any.
+
+Run `scripts/shadow-run.sh` for a week or two first and look at source divergence and staleness
+before sending the first mainnet transaction. The role accounts (`mainnet_admin`, `mainnet_pauser`,
+`mainnet_keeper`, `mainnet_price_publisher`, `mainnet_risk`) must already exist and be funded; the
+script never generates keys on mainnet.
+
 ## If a CLI flag doesn't match
 
 The flag names were originally derived offline from `stellar contract info interface --wasm

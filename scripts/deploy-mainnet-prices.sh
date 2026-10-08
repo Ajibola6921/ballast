@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Deploys ONLY the price layer to Stellar mainnet: `registry` and `price-guard`. Neither holds
+# funds, so this is the low-risk first mainnet step (the public live-price page reads from it).
+# Lending contracts (pledge-vault, credit-line, exit-desk, repo-dvp) are NOT deployed here.
+#
+# It registers every asset in scripts/shadow-assets.json, derives each asset's SAC id from the
+# real classic issuer, configures the PriceGuard bands, registers the price publisher's key as the
+# NAV attestor and turns signature checking on.
+#
+# Usage:
+#   scripts/deploy-mainnet-prices.sh --dry-run     # print every command, send nothing
+#   CONFIRM_MAINNET=deploy-prices scripts/deploy-mainnet-prices.sh
+#
+# Prerequisites (this script refuses to create keys on mainnet):
+#   - `stellar` CLI identities already exist and are FUNDED with real XLM:
+#       mainnet_admin, mainnet_pauser, mainnet_keeper, mainnet_price_publisher, mainnet_risk
+#     Use hardware/KMS-backed or multisig accounts for admin and pauser. The price publisher key
+#     is the NAV attestor: keep it in Vault/KMS for the running service (the CLI identity is only
+#     used here to derive its public key; the service signs through packages/operator-signing).
+#   - Override the defaults below with PRICE_BAND_BPS, DAILY_MOVE_BAND_BPS, MAX_STALENESS_S.
+#
+# Output: .env.mainnet-deploy at the repo root (contract ids and role addresses, no secrets).
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+NETWORK=mainnet
+OUT_FILE=".env.${NETWORK}-deploy"
+ASSETS_FILE=${ASSETS_FILE:-scripts/shadow-assets.json}
+PRICE_BAND_BPS=${PRICE_BAND_BPS:-50}
+DAILY_MOVE_BAND_BPS=${DAILY_MOVE_BAND_BPS:-100}
+# RedStone's RWA feeds update every 1-2h; the issuer NAV every few minutes.
+MAX_STALENESS_S=${MAX_STALENESS_S:-21600}
+HAIRCUT_BASE_BPS=${HAIRCUT_BASE_BPS:-500}
+
+DRY_RUN=false
+[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=true
+
+log() { echo ">>> $*"; }
+
+if [[ "$DRY_RUN" == false && "${CONFIRM_MAINNET:-}" != "deploy-prices" ]]; then
+  echo "!!! This sends real transactions on Stellar MAINNET and spends real XLM." >&2
+  echo "!!! Re-run with CONFIRM_MAINNET=deploy-prices to proceed, or --dry-run to preview." >&2
+  exit 1
+fi
+if [[ "$DRY_RUN" == false && -e "$OUT_FILE" ]]; then
+  echo "!!! $OUT_FILE already exists - a deployment is on record. Move it away deliberately to redeploy." >&2
+  exit 1
+fi
+
+retry() {
+  local -i attempt=1
+  until "$@"; do
+    if (( attempt >= 6 )); then echo "!!! command failed after 6 attempts: $*" >&2; return 1; fi
+    attempt+=1
+    sleep 3
+  done
+}
+
+# Runs a state-changing `stellar` command, or just prints it in --dry-run.
+run() {
+  if [[ "$DRY_RUN" == true ]]; then echo "[dry-run] $*" >&2; echo "DRYRUN"; else retry "$@"; fi
+}
+
+identity_address() {
+  local name=$1
+  if stellar keys address "$name" 2>/dev/null; then return; fi
+  if [[ "$DRY_RUN" == true ]]; then echo "G<$name>"; return; fi
+  echo "!!! stellar identity '$name' not found. Create and fund it first (see header)." >&2
+  exit 1
+}
+
+ADMIN=$(identity_address mainnet_admin)
+PAUSER=$(identity_address mainnet_pauser)
+KEEPER=$(identity_address mainnet_keeper)
+PRICE_PUBLISHER=$(identity_address mainnet_price_publisher)
+RISK=$(identity_address mainnet_risk)
+
+if [[ "$DRY_RUN" == false ]]; then
+  log "Checking every role account exists and has XLM on mainnet"
+  for addr in "$ADMIN" "$PAUSER" "$KEEPER" "$PRICE_PUBLISHER" "$RISK"; do
+    balance=$(curl -fsS --max-time 20 "https://horizon.stellar.org/accounts/$addr" \
+      | python3 -c 'import sys,json; print(next(b["balance"] for b in json.load(sys.stdin)["balances"] if b["asset_type"]=="native"))') \
+      || { echo "!!! $addr not found on mainnet - fund it first" >&2; exit 1; }
+    log "  $addr  $balance XLM"
+  done
+fi
+
+log "Building contracts"
+(cd contracts && for c in common registry price-guard; do (cd "$c" && stellar contract build -q); done)
+
+declare -A CID
+log "Deploying registry and price-guard"
+for c in registry price-guard; do
+  wasm="contracts/target/wasm32v1-none/release/ballast_${c//-/_}.wasm"
+  CID[$c]=$(run stellar contract deploy --wasm "$wasm" --source mainnet_admin --network "$NETWORK")
+  log "  $c -> ${CID[$c]}"
+done
+
+log "Initializing roles"
+for c in registry price-guard; do
+  run stellar contract invoke --id "${CID[$c]}" --source mainnet_admin --network "$NETWORK" -- initialize \
+    --admin "$ADMIN" --pauser "$PAUSER" --keeper "$KEEPER" \
+    --price_publisher "$PRICE_PUBLISHER" --risk "$RISK" >/dev/null
+done
+
+# A G-address is base32(version byte | 32-byte key | 2-byte checksum): the key is bytes 1..33.
+PUBLISHER_KEY_HEX=$(python3 -c 'import base64,sys; print(base64.b32decode(sys.argv[1])[1:33].hex())' "$PRICE_PUBLISHER" 2>/dev/null || echo "<publisher-key-hex>")
+
+mapfile -t ROWS < <(python3 -c '
+import json,sys
+for a in json.load(open(sys.argv[1])):
+    print("\t".join([a["code"], a["issuer"], a["ccy"]]))
+' "$ASSETS_FILE")
+
+SAC_LINES=""
+for row in "${ROWS[@]}"; do
+  IFS=$'\t' read -r CODE ISSUER CCY <<<"$row"
+  SAC=$(retry stellar contract id asset --asset "$CODE:$ISSUER" --network "$NETWORK")
+  log "Registering $CODE ($ISSUER) as $SAC"
+
+  run stellar contract invoke --id "${CID[registry]}" --source mainnet_admin --network "$NETWORK" -- register_asset \
+    --admin "$ADMIN" --asset "$SAC" \
+    --config "{\"issuer\":\"$ISSUER\",\"contract\":\"$SAC\",\"standard\":\"ClassicSac\",\"yield_type\":\"Accumulating\",\"custody_mode\":\"Escrow\",\"ccy\":\"$CCY\",\"redemption_lag_days\":1,\"haircut_base_bps\":$HAIRCUT_BASE_BPS,\"haircut_fx_bps\":0,\"price_band_bps\":$PRICE_BAND_BPS,\"daily_move_band_bps\":$DAILY_MOVE_BAND_BPS,\"status\":\"active\"}" \
+    >/dev/null
+
+  run stellar contract invoke --id "${CID[price-guard]}" --source mainnet_admin --network "$NETWORK" -- configure_asset \
+    --admin "$ADMIN" --asset "$SAC" --band_bps "$PRICE_BAND_BPS" --daily_move_band_bps "$DAILY_MOVE_BAND_BPS" \
+    --max_staleness_s "$MAX_STALENESS_S" >/dev/null
+
+  # No issuer signs NAV; the publisher key signs what the service read from the issuer's API.
+  run stellar contract invoke --id "${CID[price-guard]}" --source mainnet_admin --network "$NETWORK" -- configure_issuer_key \
+    --admin "$ADMIN" --asset "$SAC" --issuer_pubkey "$PUBLISHER_KEY_HEX" >/dev/null
+
+  SAC_LINES+="SAC_${CODE}=$SAC"$'\n'
+done
+
+log "Requiring NAV signatures"
+run stellar contract invoke --id "${CID[price-guard]}" --source mainnet_admin --network "$NETWORK" -- configure_signature_requirement \
+  --admin "$ADMIN" --required true >/dev/null
+
+if [[ "$DRY_RUN" == true ]]; then
+  log "Dry run complete: nothing was sent and $OUT_FILE was not written."
+  exit 0
+fi
+
+cat > "$OUT_FILE" <<EOT
+# Generated by scripts/deploy-mainnet-prices.sh - price layer only (no lending contracts)
+NETWORK=$NETWORK
+ADMIN=$ADMIN
+PAUSER=$PAUSER
+KEEPER=$KEEPER
+PRICE_PUBLISHER=$PRICE_PUBLISHER
+RISK=$RISK
+REGISTRY_CID=${CID[registry]}
+PRICE_GUARD_CID=${CID[price-guard]}
+${SAC_LINES}
+EOT
+log "Wrote $OUT_FILE. Point PRICE_GUARD_CONTRACT_ID / REGISTRY_CONTRACT_ID at these and run the price-guard service with PRICE_GUARD_PUBLISH=true."
