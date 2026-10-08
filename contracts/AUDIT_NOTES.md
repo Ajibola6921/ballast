@@ -60,16 +60,33 @@ uses comes from the contract's own state or from the PriceGuard, never from a ke
   Both are lender-only and not pause-gated.
 - `draw` enforces `limit` (it previously only checked `funded`). `fund` is refused on a closed line.
 - Interest is simple, non-compounding, accrued on principal per second.
-- `sync_collateral` is a keeper/admin-set figure, not a live read of the vault (avoids a circular
-  dependency). A stale figure under-states collateral (safe for the lender) or over-states it
-  (unsafe) until the next sync; the keeper syncs every minute.
+- **Collateral is reported by the vault, in the same transaction.** `PledgeVault` calls
+  `sync_from_vault` (vault-only, for the line's own collateral asset) after every pledge, release,
+  lien confirmation and liquidation. Before this the figure changed only when the keeper's
+  `sync_collateral` ran, so a borrower could `release` and then `draw` against units that had just
+  left, in the window before the next sync, leaving the lender funding against collateral that was
+  gone. `sync_collateral` remains as a keeper/admin reconciliation path and now sets the vault's own
+  balance (the keeper job reads it from the vault, never from Postgres).
 
 ## PledgeVault
 
+- `pledge` requires the line's own borrower and collateral asset, and refuses to take units in a
+  different custody mode than the position already holds (`release` moves tokens or not according to
+  the mode recorded on the position, so flipping it under live units would strand them).
 - `release` cross-calls `CreditLine::ltv` and `borrower_of`; ownership is checked there.
 - `liquidate` has no LTV check by design: it is the liquidation path, keeper-gated. Its safety
   depends on `CreditLine::liquidate` having confirmed the breach first, enforced off-chain by the
   keeper job, not on-chain.
+
+## ExitDesk
+
+- The desk's USDC float and the RWA inventory it accumulates from exits have an admin-only `withdraw`.
+  Without it the inventory only ever grew toward `desk_inventory_cap` and the desk eventually refused
+  every exit, with no way to rebalance. Withdrawing an RWA frees the same amount under its cap. This is
+  the desk's own balance: an exit is a single atomic swap, so no holder's funds are ever in the
+  contract between transactions.
+- Quotes are the guarded price less the spread, rounded down (in the desk's favour), and refuse any
+  price that is not `Ok`.
 
 ## RepoDvP
 

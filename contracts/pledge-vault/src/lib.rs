@@ -31,7 +31,10 @@
 //! `Registry` instead of duplicating admin input here.
 //!
 //! **PledgeVault ↔ CreditLine wiring.** `release` cross-calls `CreditLine::ltv` (read-only) to get
-//! the line's current debt before deciding whether a release keeps the line healthy.
+//! the line's current debt before deciding whether a release keeps the line healthy, and every
+//! change to a position is reported back through `CreditLine::sync_from_vault` in the same
+//! transaction, so the line never counts collateral the vault has already let go of. `pledge` also
+//! requires the line's own borrower and collateral asset.
 //! `CreditLine::liquidate` (in the sibling `credit-line` crate) is the PRD's designated
 //! liquidation entry point; that crate is deliberately decoupled from this one (no Cargo
 //! dependency either way) and in this pass does not itself cross-call `PledgeVault::liquidate` —

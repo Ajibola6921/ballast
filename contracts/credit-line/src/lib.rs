@@ -14,13 +14,13 @@
 //! another agent, not stable to depend on in this pass). A later integration pass would sync
 //! these from `Registry` instead of duplicating admin input here.
 //!
-//! **Documented simplification — collateral sync.** `sync_collateral` is a keeper/admin-gated
-//! entry point that sets `pledged_units` directly, rather than `CreditLine` doing a live
-//! cross-contract read of `PledgeVault`'s actual position on every draw/ltv call. In the real
-//! system the off-chain `margin-monitor` service (PRD §6.5) keeps this synced from `PledgeVault`'s
-//! on-chain balance via the indexer. Keeping it an explicit sync call (rather than a direct
-//! `CreditLine -> PledgeVault` read) also avoids a circular contract dependency, since
-//! `PledgeVault::release` already cross-calls *this* contract's `ltv` view the other way.
+//! **Collateral sync.** `PledgeVault` reports a line's units through `sync_from_vault` in the same
+//! transaction as every pledge, release, lien confirmation and liquidation, so `pledged_units`
+//! moves with the vault's balance. (It used to change only when the keeper ran `sync_collateral`,
+//! which let a borrower release collateral and draw against it inside the window before the next
+//! sync.) `sync_collateral` remains, keeper/admin-gated, as a reconciliation path that sets the
+//! figure to the vault's own balance; the dependency runs one way only (`PledgeVault` calls this
+//! contract; this contract never calls the vault), so there is no circular call.
 //!
 //! **Documented wiring gap — liquidation.** `liquidate` here only flips the line's status to
 //! `Liquidating` after confirming a two-read breach (PRD §8 invariant 3); it does not itself move
