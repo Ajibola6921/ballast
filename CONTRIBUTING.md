@@ -74,7 +74,7 @@ This is a pnpm + Turborepo monorepo:
   simplification in a module-level doc comment rather than leaving it silent.
 - **No mock data anywhere in `src`.** Services read real sources only (see
   `services/price-guard/src/adapters/`); there is no `mock` mode and no fake adapter to fall back
-  on. A source that is unavailable or unconfigured must fail loudly or skip the asset, never answer
+  on (`scripts/check-no-mocks.sh` runs in CI and fails if one comes back). A source that is unavailable or unconfigured must fail loudly or skip the asset, never answer
   with a made-up value. Test doubles belong in `*.test.ts` files, and anything they replay from an
   external API should be a response recorded from the real endpoint (`__fixtures__/`), not
   hand-written. A new integration should fail fast on missing config and alert on a failed fetch,
