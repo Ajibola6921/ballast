@@ -13,7 +13,7 @@ import {
   openCreditLineSchema,
   withdrawSchema,
 } from "../schemas.js";
-import { estimateLtvBps, outstandingDebt, requireAsset, requireCreditLine, requireStellarAccount } from "./helpers.js";
+import { estimateLtvBps, isLineParty, outstandingDebt, requireAsset, requireCreditLine, requireStellarAccount } from "./helpers.js";
 
 const MARGIN_THRESHOLDS = { warningBps: 7000, marginCallBps: 8000, liquidationBps: 9000 };
 
@@ -73,6 +73,10 @@ export function registerCreditLineRoutes(
     try {
       line = await requireCreditLine(db, request.params.id);
     } catch {
+      return reply.code(404).send({ error: "credit line not found" });
+    }
+    // Same answer as a line that does not exist: don't confirm another party's line is there.
+    if (!isLineParty(line, request.partyId, "either")) {
       return reply.code(404).send({ error: "credit line not found" });
     }
 
@@ -258,6 +262,10 @@ export function registerCreditLineRoutes(
       return reply.code(409).send({ error: "credit line has not settled on-chain yet" });
     }
 
+    if (!isLineParty(line, request.partyId, "borrower")) {
+      return reply.code(403).send({ error: "only this line's borrower may pledge to it" });
+    }
+
     const asset = await requireAsset(db, body.assetId);
     const borrowerAccount = await requireStellarAccount(db, line.borrowerId);
 
@@ -303,6 +311,10 @@ export function registerCreditLineRoutes(
       }
       if (!line.contractLineId) {
         return reply.code(409).send({ error: "credit line has not settled on-chain yet" });
+      }
+
+      if (!isLineParty(line, request.partyId, "borrower")) {
+        return reply.code(403).send({ error: "only this line's borrower may release its collateral" });
       }
 
       const [pledge] = await db
@@ -358,6 +370,9 @@ export function registerCreditLineRoutes(
     if (!line.contractLineId) {
       return reply.code(409).send({ error: "credit line has not settled on-chain yet" });
     }
+    if (!isLineParty(line, request.partyId, "borrower")) {
+      return reply.code(403).send({ error: "only this line's borrower may draw on it" });
+    }
     const borrowerAccount = await requireStellarAccount(db, line.borrowerId);
 
     // `draw` rows require a real `tx_hash`/`ledger` (populated by the indexer once the signed tx
@@ -389,6 +404,9 @@ export function registerCreditLineRoutes(
     }
     if (!line.contractLineId) {
       return reply.code(409).send({ error: "credit line has not settled on-chain yet" });
+    }
+    if (!isLineParty(line, request.partyId, "borrower")) {
+      return reply.code(403).send({ error: "only this line's borrower may repay it" });
     }
     const borrowerAccount = await requireStellarAccount(db, line.borrowerId);
 

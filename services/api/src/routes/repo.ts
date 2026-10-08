@@ -61,6 +61,9 @@ export function registerRepoRoutes(app: FastifyInstance, db: Database, contracts
     const body = repoTradeActionSchema.parse(request.body ?? {});
     const [trade] = await db.select().from(schema.repoTrade).where(eq(schema.repoTrade.id, request.params.id)).limit(1);
     if (!trade) return reply.code(404).send({ error: "repo proposal not found" });
+    if (trade.cashBorrowerId !== request.partyId) {
+      return reply.code(403).send({ error: "only the cash borrower can accept a repo proposal" });
+    }
     if (trade.status !== "proposed") return reply.code(409).send({ error: `trade is ${trade.status}` });
 
     const cashBorrowerAccount = await requireStellarAccount(db, trade.cashBorrowerId);
@@ -83,6 +86,9 @@ export function registerRepoRoutes(app: FastifyInstance, db: Database, contracts
     const body = repoTradeActionSchema.parse(request.body ?? {});
     const [trade] = await db.select().from(schema.repoTrade).where(eq(schema.repoTrade.id, request.params.id)).limit(1);
     if (!trade) return reply.code(404).send({ error: "repo trade not found" });
+    if (trade.cashBorrowerId !== request.partyId && trade.cashLenderId !== request.partyId) {
+      return reply.code(404).send({ error: "repo trade not found" });
+    }
     if (trade.status !== "settled") return reply.code(409).send({ error: `trade is ${trade.status}, not settled` });
 
     const cashBorrowerAccount = await requireStellarAccount(db, trade.cashBorrowerId);

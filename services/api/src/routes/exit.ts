@@ -48,6 +48,7 @@ export function registerExitRoutes(app: FastifyInstance, db: Database, contracts
     const body = exitExecuteSchema.parse(request.body);
     const [quote] = await db.select().from(schema.exitQuote).where(eq(schema.exitQuote.id, request.params.id)).limit(1);
     if (!quote) return reply.code(404).send({ error: "quote not found" });
+    if (quote.holderId !== request.partyId) return reply.code(404).send({ error: "quote not found" });
     if (quote.status !== "open") return reply.code(409).send({ error: `quote is ${quote.status}` });
     if (quote.expiresAt.getTime() < Date.now()) {
       await db.update(schema.exitQuote).set({ status: "expired" }).where(eq(schema.exitQuote.id, quote.id));

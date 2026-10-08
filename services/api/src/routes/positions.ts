@@ -10,6 +10,8 @@ export function registerPositionRoutes(app: FastifyInstance, db: Database): void
     const parsed = querySchema.safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ error: "party query param is required" });
     const { party } = parsed.data;
+    // A party reads its own book and nobody else's.
+    if (party !== request.partyId) return reply.code(403).send({ error: "you can only read your own positions" });
 
     const creditLines = await db
       .select()

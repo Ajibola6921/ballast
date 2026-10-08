@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { and, gte, lt } from "drizzle-orm";
+import { and, eq, gte, lt, or } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
 import { z } from "zod";
 
@@ -29,13 +29,28 @@ export function registerReportRoutes(app: FastifyInstance, db: Database): void {
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
     const inDay = (col: any) => and(gte(col, dayStart), lt(col, dayEnd));
 
-    const [marginEvents, liquidations, draws, repayments, priceSnapshots] = await Promise.all([
+    // The report covers the caller's own lines only. Price snapshots are public.
+    const mine = new Set(
+      (
+        await db
+          .select()
+          .from(schema.creditLine)
+          .where(or(eq(schema.creditLine.lenderId, request.partyId), eq(schema.creditLine.borrowerId, request.partyId)))
+      ).map((l) => l.id),
+    );
+    const ownLines = <T extends { creditLineId: string }>(rows: T[]) => rows.filter((r) => mine.has(r.creditLineId));
+
+    const [marginEventsAll, liquidationsAll, drawsAll, repaymentsAll, priceSnapshots] = await Promise.all([
       db.select().from(schema.marginEvent).where(inDay(schema.marginEvent.createdAt)),
       db.select().from(schema.liquidation).where(inDay(schema.liquidation.startedAt)),
       db.select().from(schema.draw).where(inDay(schema.draw.createdAt)),
       db.select().from(schema.repayment).where(inDay(schema.repayment.createdAt)),
       db.select().from(schema.priceSnapshot).where(inDay(schema.priceSnapshot.createdAt)),
     ]);
+    const marginEvents = ownLines(marginEventsAll);
+    const liquidations = ownLines(liquidationsAll);
+    const draws = ownLines(drawsAll);
+    const repayments = ownLines(repaymentsAll);
 
     const report = { date, marginEvents, liquidations, draws, repayments, priceSnapshots };
 

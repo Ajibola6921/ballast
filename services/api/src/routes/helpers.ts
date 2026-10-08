@@ -23,6 +23,20 @@ export async function requireAsset(db: Database, assetId: string) {
   return asset;
 }
 
+type LineParties = { lenderId: string; borrowerId: string };
+
+/**
+ * Who a request is allowed to act as on a line. Every route that builds a transaction or writes a
+ * row on a line's behalf checks this first: otherwise any authenticated caller could create junk
+ * pledges, flip a victim's pledge to `pending_release`, or write audit entries attributed to the
+ * borrower's account.
+ */
+export function isLineParty(line: LineParties, partyId: string, role: "borrower" | "lender" | "either"): boolean {
+  if (role === "borrower") return line.borrowerId === partyId;
+  if (role === "lender") return line.lenderId === partyId;
+  return line.borrowerId === partyId || line.lenderId === partyId;
+}
+
 export async function requireCreditLine(db: Database, id: string) {
   const [line] = await db.select().from(schema.creditLine).where(eq(schema.creditLine.id, id)).limit(1);
   if (!line) throw new Error(`credit line ${id} not found`);
