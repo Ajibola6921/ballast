@@ -60,6 +60,7 @@ mod mock_token {
     #[contracttype]
     enum DataKey {
         Balance(Address),
+        Allowance(Address, Address),
     }
 
     #[contract]
@@ -79,6 +80,49 @@ mod mock_token {
                 .persistent()
                 .get(&DataKey::Balance(id))
                 .unwrap_or(0)
+        }
+
+        pub fn approve(
+            env: Env,
+            from: Address,
+            spender: Address,
+            amount: i128,
+            _expiration_ledger: u32,
+        ) {
+            from.require_auth();
+            env.storage()
+                .persistent()
+                .set(&DataKey::Allowance(from, spender), &amount);
+        }
+
+        pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
+            env.storage()
+                .persistent()
+                .get(&DataKey::Allowance(from, spender))
+                .unwrap_or(0)
+        }
+
+        pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+            spender.require_auth();
+            let allowance = Self::allowance(env.clone(), from.clone(), spender.clone());
+            if allowance < amount {
+                panic!("mock-token: insufficient allowance");
+            }
+            let from_balance = Self::balance(env.clone(), from.clone());
+            if from_balance < amount {
+                panic!("mock-token: insufficient balance");
+            }
+            let to_balance = Self::balance(env.clone(), to.clone());
+            env.storage().persistent().set(
+                &DataKey::Allowance(from.clone(), spender),
+                &(allowance - amount),
+            );
+            env.storage()
+                .persistent()
+                .set(&DataKey::Balance(from), &(from_balance - amount));
+            env.storage()
+                .persistent()
+                .set(&DataKey::Balance(to), &(to_balance + amount));
         }
 
         pub fn transfer(env: Env, from: Address, to: MuxedAddress, amount: i128) {
@@ -117,11 +161,10 @@ struct Harness {
 
 fn setup() -> Harness {
     let env = Env::default();
-    // `accept_and_settle` needs `cash_lender.require_auth()` for a USDC transfer even though
-    // `cash_borrower` is the top-level caller (in production, `cash_lender` pre-authorizes this
-    // specific transfer as part of accepting the repo terms). Plain `mock_all_auths()` only mocks
-    // auths tied to the root invocation, so this test harness needs the non-root variant.
-    env.mock_all_auths_allowing_non_root_auth();
+    // Strict mocking: only authorizations reachable from the top-level caller count. Every
+    // cash leg must therefore work off that caller's signature or a previously granted allowance,
+    // exactly as on a real network.
+    env.mock_all_auths();
     env.ledger().set_timestamp(1_000);
 
     let admin = Address::generate(&env);
@@ -214,7 +257,10 @@ fn accept_and_settle_reverts_atomically_on_insufficient_cash() {
     // Invariant 7: neither leg actually applied. The contract holds no RWA for this trade, the
     // borrower still has their units, and the trade is still "proposed", not "settled".
     assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&h.repo), 0);
-    assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&h.cash_borrower), units);
+    assert_eq!(
+        MockTokenClient::new(&h.env, &h.rwa).balance(&h.cash_borrower),
+        units
+    );
     let trade = RepoDvpClient::new(&h.env, &h.repo).trade(&id);
     assert_eq!(trade.status, RepoStatus::Proposed);
 }
@@ -235,7 +281,10 @@ fn accept_and_settle_then_unwind_pays_principal_plus_interest() {
     RepoDvpClient::new(&h.env, &h.repo).accept_and_settle(&h.cash_borrower, &id);
 
     assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&h.repo), units);
-    assert_eq!(MockTokenClient::new(&h.env, &h.usdc).balance(&h.cash_borrower), cash_amount);
+    assert_eq!(
+        MockTokenClient::new(&h.env, &h.usdc).balance(&h.cash_borrower),
+        cash_amount
+    );
 
     let expected_interest = accrue_interest(cash_amount, rate_bps, term_seconds);
     assert!(expected_interest > 0);
@@ -249,11 +298,99 @@ fn accept_and_settle_then_unwind_pays_principal_plus_interest() {
         MockTokenClient::new(&h.env, &h.usdc).balance(&h.cash_lender),
         cash_amount + expected_interest
     );
-    assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&h.cash_borrower), units);
+    assert_eq!(
+        MockTokenClient::new(&h.env, &h.rwa).balance(&h.cash_borrower),
+        units
+    );
     assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&h.repo), 0);
 
     let trade = RepoDvpClient::new(&h.env, &h.repo).trade(&id);
     assert_eq!(trade.status, RepoStatus::Unwound);
+}
+
+/// The keeper is neither party, so nobody whose money moves is signing: leg 2 has to run on the
+/// allowance the borrower granted at settlement.
+#[test]
+fn keeper_can_unwind_at_maturity_using_the_borrowers_allowance() {
+    let h = setup();
+    let units = 100 * PRICE_SCALE;
+    let cash_amount = 90 * PRICE_SCALE;
+    let rate_bps = 500u32;
+    let term_seconds = 3_600u64;
+    let maturity = h.env.ledger().timestamp() + term_seconds;
+    let id = propose(&h, units, cash_amount, rate_bps, maturity);
+
+    MockTokenClient::new(&h.env, &h.rwa).mint(&h.cash_borrower, &units);
+    MockTokenClient::new(&h.env, &h.usdc).mint(&h.cash_lender, &cash_amount);
+
+    RepoDvpClient::new(&h.env, &h.repo).accept_and_settle(&h.cash_borrower, &id);
+    assert_eq!(
+        MockTokenClient::new(&h.env, &h.usdc).balance(&h.cash_borrower),
+        cash_amount
+    );
+
+    // The allowance covers what leg 2 will owe (here exactly, as the proposal settled in the
+    // ledger it was made in).
+    let interest = accrue_interest(cash_amount, rate_bps, term_seconds);
+    assert_eq!(
+        MockTokenClient::new(&h.env, &h.usdc).allowance(&h.cash_borrower, &h.repo),
+        cash_amount + interest
+    );
+    MockTokenClient::new(&h.env, &h.usdc).mint(&h.cash_borrower, &interest);
+
+    h.env.ledger().set_timestamp(maturity);
+    RepoDvpClient::new(&h.env, &h.repo).unwind(&h.keeper, &id);
+
+    assert_eq!(
+        MockTokenClient::new(&h.env, &h.usdc).balance(&h.cash_lender),
+        cash_amount + interest
+    );
+    assert_eq!(
+        MockTokenClient::new(&h.env, &h.rwa).balance(&h.cash_borrower),
+        units
+    );
+    assert_eq!(
+        RepoDvpClient::new(&h.env, &h.repo).trade(&id).status,
+        RepoStatus::Unwound
+    );
+}
+
+#[test]
+fn accept_and_settle_refuses_a_proposal_past_its_maturity() {
+    let h = setup();
+    let units = 100 * PRICE_SCALE;
+    let cash_amount = 90 * PRICE_SCALE;
+    let maturity = h.env.ledger().timestamp() + 3_600;
+    let id = propose(&h, units, cash_amount, 500, maturity);
+
+    MockTokenClient::new(&h.env, &h.rwa).mint(&h.cash_borrower, &units);
+    MockTokenClient::new(&h.env, &h.usdc).mint(&h.cash_lender, &cash_amount);
+
+    h.env.ledger().set_timestamp(maturity);
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        RepoDvpClient::new(&h.env, &h.repo).accept_and_settle(&h.cash_borrower, &id);
+    }));
+    assert!(result.is_err());
+    assert_eq!(
+        MockTokenClient::new(&h.env, &h.usdc).balance(&h.cash_lender),
+        cash_amount
+    );
+}
+
+/// The expiry handed to `approve` must not depend on which ledger the call lands in, or a
+/// transaction simulated in one ledger and executed in the next would fail authorization.
+#[test]
+fn allowance_expiry_is_stable_across_neighbouring_ledgers() {
+    let h = setup();
+    h.env.ledger().set_sequence_number(1_000_000);
+    let at = |h: &Harness| {
+        h.env
+            .as_contract(&h.repo, || allowance_expiry(&h.env, 3_600, 0))
+    };
+    let first = at(&h);
+    h.env.ledger().set_sequence_number(1_000_003);
+    assert_eq!(at(&h), first);
+    assert!(first >= 1_000_003 + 720);
 }
 
 #[test]
@@ -278,7 +415,10 @@ fn call_margin_and_default_close_gives_lender_the_collateral() {
     h.env.ledger().set_timestamp(deadline);
     RepoDvpClient::new(&h.env, &h.repo).default_close(&h.keeper, &id);
 
-    assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&h.cash_lender), units);
+    assert_eq!(
+        MockTokenClient::new(&h.env, &h.rwa).balance(&h.cash_lender),
+        units
+    );
     assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&h.repo), 0);
     let trade = RepoDvpClient::new(&h.env, &h.repo).trade(&id);
     assert_eq!(trade.status, RepoStatus::Defaulted);

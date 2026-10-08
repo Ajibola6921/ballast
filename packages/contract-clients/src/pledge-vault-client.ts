@@ -25,6 +25,26 @@ export class PledgeVaultClient extends BaseContractClient {
     ]);
   }
 
+  /**
+   * Keeper-only: moves `units` of a liquidating line's collateral out of the vault to `to`
+   * (`PledgeVault::liquidate`). The contract applies no LTV check here — it's the caller's job
+   * to have had `CreditLine::liquidate` confirm the breach first.
+   */
+  liquidate(source: string, line: bigint, assetAddress: string, units: bigint, to: string): Promise<string> {
+    return this.invoke(source, "liquidate", [
+      scAddress(source),
+      scU64(line),
+      scAddress(assetAddress),
+      scI128(units),
+      scAddress(to),
+    ]);
+  }
+
+  /** Read-only: units currently counted for `(line, asset)`. */
+  positionUnits(line: bigint, assetAddress: string): Promise<bigint> {
+    return this.read<bigint>("position_units", [scU64(line), scAddress(assetAddress)]);
+  }
+
   recordLien(
     source: string,
     line: bigint,

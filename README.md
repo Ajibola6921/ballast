@@ -75,6 +75,32 @@ Ask 2–3 anchors and one issuer (Spiko or Etherfuse) before writing code.
 
 Names are working names. Check trademarks and domains before using them publicly.
 
+## Running it
+
+Ideas 1-3 run end to end today: six contracts on Stellar testnet, eight services, Postgres, and a
+web console. You need Node >= 22.12, pnpm, the
+[Stellar CLI](https://developers.stellar.org/docs/tools/cli), and Docker or Podman.
+
+```bash
+pnpm install
+scripts/deploy.sh testnet      # only for a fresh deployment - see TESTNET_DEPLOYMENT.md for the live one
+scripts/dev-setup.sh testnet   # Postgres, .env, migrations, seeded lender/borrower/asset
+pnpm dev                       # all services + console on http://localhost:5173
+scripts/e2e-services.sh        # collateral rail, exit desk and repo, through the API
+scripts/e2e-liquidation.sh     # price falls, the services liquidate a line on their own
+```
+
+How a transaction flows: `services/api` builds unsigned XDR and records what it means
+(`tx_intent`); the customer signs it in their own wallet (Freighter in the console); the signed
+envelope comes back through `POST /v1/tx/submit`, and once the ledger closes the API updates the
+books. A background sweep settles anything submitted another way and writes off transactions that
+were never signed.
+
+Around that: `services/price-guard` keeps the on-chain price fresh; `services/keeper` syncs
+pledged collateral into the credit line, unwinds repos at maturity and runs liquidations;
+`services/margin-monitor` records margin-state changes; `services/indexer` mirrors contract
+events. [`scripts/README.md`](scripts/README.md) has the details and what is still mocked.
+
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development setup, repo layout, and per-surface

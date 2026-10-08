@@ -24,7 +24,7 @@ deployment with real signed, submitted transactions.
 | `pledge-vault` | `CBEHWDRZIFFO3GPIOFK7LYEXKVBUGCYQIE2RG5I6QBI3DK4WCXRNS35D` |
 | `credit-line` | `CDVZO4D6BMQHUJQKFWRIWG4EQ7WXFPVYQDPM3Z65RLUXIFVCHTFFIXFI` |
 | `exit-desk` | `CCGW2ZXMXS4MAPPXR3UDZXBMQZHSA5OYFDGP46SLMFJMEQ5CNY77AJ6G` |
-| `repo-dvp` | `CBFJZ5VLW63ESYWOKKX73ZKL26SHB6EZUMHOIGF5NJVLUVBDWVJW27UG` |
+| `repo-dvp` | `CB4MT4VRRS6IBK326OM5E4M3C37H6QCLI7S5F2HIF6UXJDRTRPRWBPSD` (redeployed 2026-10-07, see below) |
 
 Test assets registered against this deployment (issued fresh for this deploy, not real RWAs):
 
@@ -98,3 +98,47 @@ bugs surfaced and were fixed along the way (both now fixed in the scripts, so a 
    comment already admitted its CLI flags "weren't hand-verified against a live deployment" —
    this was the first live deployment). **Fixed**: `scripts/deploy.sh` now also establishes a TUSD
    trustline for the borrower.
+
+## Services E2E result
+
+**Passed** on 2026-10-06 via `scripts/e2e-services.sh testnet` against this deployment, with
+`pnpm dev` running every service: SEP-10 login for lender and borrower, then open (on-chain line
+id `4`), fund 50 TUSD, two pledges (100 + 50 RWA1), `services/keeper` syncing the collateral and
+`services/price-guard` publishing an `Ok` price, draw 20 TUSD (LTV 1403 bps, `Healthy`), repay
+20 TUSD (booked as principal 19.9999996 + interest 0.0000004), release the 50 RWA1 pledge, and the
+keeper syncing collateral back down. Every transaction was built by `services/api`, signed by the
+customer's own key outside the API, and submitted through `POST /v1/tx/submit`.
+
+Getting there needed `@stellar/stellar-sdk` 17: the 13.x line this repo started on cannot decode
+transaction results from the current testnet protocol (`Bad union switch: 4`), which broke every
+service that submits a transaction.
+
+On-chain lines `1`-`3` are leftovers from the runs that surfaced that and two other bugs.
+
+## 2026-10-07: repo-dvp redeployed, desks configured
+
+`repo-dvp` was redeployed (the other five contracts are the 2026-09-17 originals). The first
+version moved each cash leg with a plain `transfer` out of the wallet of a party who isn't signing
+that call - the lender's cash in `accept_and_settle`, the borrower's in a lender- or
+keeper-triggered `unwind` - which the network rejects. The new version has each party grant a
+token allowance in the call they do sign and spends it with `transfer_from`; see the contract's
+module docs. Previous address: `CBFJZ5VLW63ESYWOKKX73ZKL26SHB6EZUMHOIGF5NJVLUVBDWVJW27UG`.
+
+`scripts/configure-desks.sh testnet` was then run: `ExitDesk` configured for `RWA1` (25 bps spread)
+and funded with 5,000 TUSD, `RepoDvp` configured for `RWA1`/TUSD, an `RWA1` trustline added for
+the lender (to receive liquidated collateral).
+
+Passed against this deployment with `pnpm dev` running, all on 2026-10-07:
+
+- `scripts/e2e-services.sh testnet` - the collateral rail again (line `6`); an exit of 10 RWA1 for
+  9.975 TUSD; a repo of 50 TUSD against 100 RWA1, accepted by the borrower and unwound at maturity
+  by `services/keeper` (leg 2 tx
+  `b2cd168ad72ee02c1d3159be879b2c57610707288b06a65c6b76d0f78300d4e7`).
+- `scripts/e2e-liquidation.sh testnet` - 60 TUSD drawn against 100 RWA1, mock price dropped to
+  $0.62 (LTV 10183 bps), line liquidated by the keeper after its 60s cure window and the 100 RWA1
+  sent to the lender (txs `9f480616bd1523085f026b9fa00f6e8c1bc391429d48d585a27b6266bc95f780`,
+  `5a963e4652669f18a04cd132438ddb90f81cd1bb10b3cc9f67c5da67c70d8e0c`). Price and band restored
+  afterwards.
+
+That liquidated line is still `Liquidating` on-chain with its 60 TUSD of debt outstanding: the
+contracts have no step that closes a liquidated line or books recovered value against the debt.

@@ -12,6 +12,7 @@
 import { createPrivateKey, createPublicKey, sign as cryptoSign } from "node:crypto";
 import type { IssuerNavAdapter } from "./types.js";
 import { canonicalNavMessage } from "../navSignature.js";
+import { mockBasePrice } from "./mockPriceFile.js";
 
 const PRICE_SCALE = 10_000_000n;
 
@@ -57,7 +58,7 @@ export class MockSpikoAdapter implements IssuerNavAdapter {
   ) {}
 
   async fetchNav(assetCode: string): Promise<{ value: bigint; ts: number; sig: Buffer }> {
-    const value = jitteredDollar(this.baseValue, this.maxJitterBps);
+    const value = jitteredDollar(mockBasePrice(assetCode, this.baseValue), this.maxJitterBps);
     const ts = Math.floor(Date.now() / 1000);
     return { value, ts, sig: signMockNav(assetCode, ts, value) };
   }
@@ -71,7 +72,7 @@ export class MockEtherfuseAdapter implements IssuerNavAdapter {
   ) {}
 
   async fetchNav(assetCode: string): Promise<{ value: bigint; ts: number; sig: Buffer }> {
-    const value = jitteredDollar(this.baseValue, this.maxJitterBps);
+    const value = jitteredDollar(mockBasePrice(assetCode, this.baseValue), this.maxJitterBps);
     const ts = Math.floor(Date.now() / 1000);
     return { value, ts, sig: signMockNav(assetCode, ts, value) };
   }
@@ -85,7 +86,7 @@ export class MockFranklinAdapter implements IssuerNavAdapter {
   ) {}
 
   async fetchNav(assetCode: string): Promise<{ value: bigint; ts: number; sig: Buffer }> {
-    const value = jitteredDollar(this.baseValue, this.maxJitterBps);
+    const value = jitteredDollar(mockBasePrice(assetCode, this.baseValue), this.maxJitterBps);
     const ts = Math.floor(Date.now() / 1000);
     return { value, ts, sig: signMockNav(assetCode, ts, value) };
   }

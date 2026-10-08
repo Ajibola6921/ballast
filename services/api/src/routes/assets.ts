@@ -23,6 +23,7 @@ export function registerAssetRoutes(app: FastifyInstance, db: Database): void {
         return {
           id: asset.id,
           code: asset.code,
+          contractC: asset.contractC,
           ccy: asset.ccy,
           standard: asset.standard,
           custodyMode: asset.custodyMode,

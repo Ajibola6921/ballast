@@ -4,6 +4,7 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public body?: unknown,
   ) {
     super(message);
   }
@@ -13,14 +14,15 @@ async function request<T>(path: string, token: string | null, init?: RequestInit
   const res = await fetch(`${API_URL}${path}`, {
     ...init,
     headers: {
-      "content-type": "application/json",
+      // Only with a body: Fastify rejects a JSON content-type on an empty one (e.g. DELETE).
+      ...(init?.body ? { "content-type": "application/json" } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...init?.headers,
     },
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new ApiError(res.status, body.error ?? `request to ${path} failed with ${res.status}`);
+    throw new ApiError(res.status, body.error ?? body.message ?? `request to ${path} failed with ${res.status}`, body);
   }
   return body as T;
 }
@@ -49,6 +51,93 @@ export const api = {
       body: JSON.stringify({ transaction: signedTransaction }),
     }),
 
+  /** Hands a wallet-signed envelope back; resolves once the network has a verdict (or `pending`). */
+  submitTx: async (token: string, signedXdr: string): Promise<TxResult> => {
+    try {
+      return await request<TxResult>("/v1/tx/submit", token, {
+        method: "POST",
+        body: JSON.stringify({ signedXdr }),
+      });
+    } catch (err) {
+      // 422 is "it closed, and failed on-chain" — a result, not a transport error.
+      if (err instanceof ApiError && err.status === 422 && err.body) return err.body as TxResult;
+      throw err;
+    }
+  },
+
+  settleTx: (token: string, txHash: string) =>
+    request<TxResult>(`/v1/tx/${txHash}/settle`, token, { method: "POST" }),
+
+  partyByAccount: (token: string, account: string) =>
+    request<{ partyId: string; legalName: string | null; kind: string }>(
+      `/v1/parties/by-account/${account}`,
+      token,
+    ),
+
+  openCreditLine: (
+    token: string,
+    args: {
+      lenderId: string;
+      borrowerId: string;
+      loanCcy: string;
+      limit: bigint;
+      rateBps: number;
+      cureWindowS: number;
+      asset: string;
+    },
+  ) =>
+    request<BuiltTx & { creditLineId: string }>("/v1/credit-lines", token, {
+      method: "POST",
+      body: JSON.stringify({
+        ...args,
+        limit: args.limit.toString(),
+        feeBps: 0,
+        // No off-chain agreement document is attached from the console yet.
+        agreementHash: "00".repeat(32),
+      }),
+    }),
+
+  exitQuote: (token: string, assetId: string, units: bigint) =>
+    request<ExitQuoteResult>("/v1/exit/quotes", token, {
+      method: "POST",
+      body: JSON.stringify({ assetId, units: units.toString() }),
+    }),
+
+  exitExecute: (token: string, quoteId: string, minUsdcOut: bigint, to: string) =>
+    request<BuiltTx>(`/v1/exit/quotes/${quoteId}/execute`, token, {
+      method: "POST",
+      body: JSON.stringify({ minUsdcOut: minUsdcOut.toString(), to }),
+    }),
+
+  repoPropose: (
+    token: string,
+    args: {
+      cashLenderId: string;
+      cashBorrowerId: string;
+      assetId: string;
+      units: bigint;
+      cashAmount: bigint;
+      rateBps: number;
+      kind: RepoKind;
+      maturityAt: string;
+    },
+  ) =>
+    request<BuiltTx & { tradeId: string }>("/v1/repo/proposals", token, {
+      method: "POST",
+      body: JSON.stringify({
+        ...args,
+        units: args.units.toString(),
+        cashAmount: args.cashAmount.toString(),
+        agreementHash: "00".repeat(32),
+      }),
+    }),
+
+  repoAccept: (token: string, tradeId: string) =>
+    request<BuiltTx>(`/v1/repo/proposals/${tradeId}/accept`, token, { method: "POST" }),
+
+  repoUnwind: (token: string, tradeId: string) =>
+    request<BuiltTx>(`/v1/repo/trades/${tradeId}/unwind`, token, { method: "POST" }),
+
   assets: (token: string) => request<{ assets: AssetSummary[] }>("/v1/assets", token),
 
   positions: (token: string, partyId: string) =>
@@ -57,40 +146,55 @@ export const api = {
   creditLine: (token: string, id: string) => request<CreditLineDetail>(`/v1/credit-lines/${id}`, token),
 
   fund: (token: string, id: string, amount: bigint) =>
-    request<{ xdr: string }>(`/v1/credit-lines/${id}/fund`, token, {
+    request<BuiltTx>(`/v1/credit-lines/${id}/fund`, token, {
       method: "POST",
       body: JSON.stringify({ amount: amount.toString() }),
     }),
 
   draw: (token: string, id: string, amount: bigint, to: string) =>
-    request<{ xdr: string }>(`/v1/credit-lines/${id}/draws`, token, {
+    request<BuiltTx>(`/v1/credit-lines/${id}/draws`, token, {
       method: "POST",
       body: JSON.stringify({ amount: amount.toString(), to }),
     }),
 
   repay: (token: string, id: string, amount: bigint) =>
-    request<{ xdr: string }>(`/v1/credit-lines/${id}/repayments`, token, {
+    request<BuiltTx>(`/v1/credit-lines/${id}/repayments`, token, {
       method: "POST",
       body: JSON.stringify({ amount: amount.toString() }),
     }),
 
   pledge: (token: string, id: string, assetId: string, units: bigint, custodyMode: string) =>
-    request<{ xdr: string; pledgeId: string }>(`/v1/credit-lines/${id}/pledges`, token, {
+    request<BuiltTx & { pledgeId: string }>(`/v1/credit-lines/${id}/pledges`, token, {
       method: "POST",
       body: JSON.stringify({ assetId, units: units.toString(), custodyMode }),
     }),
 
   releasePledge: (token: string, lineId: string, pledgeId: string) =>
-    request<{ xdr: string; projectedLtvBps: number }>(
+    request<BuiltTx & { projectedLtvBps: number }>(
       `/v1/credit-lines/${lineId}/pledges/${pledgeId}`,
       token,
       { method: "DELETE" },
     ),
 };
 
+/** What every state-changing route returns: an unsigned envelope and the hash it will have. */
+export interface BuiltTx {
+  xdr: string;
+  txHash: string;
+}
+
+export interface TxResult {
+  txHash: string;
+  kind: string;
+  refId: string | null;
+  status: "pending" | "settled" | "failed";
+  ledger: number | null;
+}
+
 export interface AssetSummary {
   id: string;
   code: string;
+  contractC: string;
   ccy: string;
   standard: string;
   custodyMode: string;
@@ -123,12 +227,50 @@ export interface PledgeRow {
   status: string;
 }
 
+export type RepoKind = "intraday" | "overnight" | "open" | "term";
+
+/** A fresh quote: amounts are 7-decimal-scaled bigint strings (see lib/format.ts). */
+export interface ExitQuoteResult {
+  id: string;
+  assetId: string;
+  units: string;
+  price: string;
+  spreadBps: number;
+  usdcOut: string;
+  expiresAt: string;
+}
+
+/** A stored quote row from `/v1/positions`: amounts are decimal strings. */
+export interface ExitQuoteRow {
+  id: string;
+  assetId: string;
+  units: string;
+  usdcOut: string;
+  spreadBps: number;
+  expiresAt: string;
+  status: string;
+}
+
+export interface RepoTradeRow {
+  id: string;
+  cashLenderId: string;
+  cashBorrowerId: string;
+  assetId: string;
+  units: string;
+  cashAmount: string;
+  rateBps: number;
+  kind: RepoKind;
+  maturityAt: string;
+  status: string;
+  contractTradeId: string | null;
+}
+
 export interface PositionsResult {
   party: string;
   creditLines: CreditLineRow[];
   pledges: PledgeRow[];
-  exitQuotes: unknown[];
-  repoTrades: unknown[];
+  exitQuotes: ExitQuoteRow[];
+  repoTrades: RepoTradeRow[];
 }
 
 export interface CreditLineDetail {
@@ -145,4 +287,8 @@ export interface CreditLineDetail {
   contractLineId: string | null;
   ltvBps: number;
   marginState: "Healthy" | "Warning" | "MarginCall" | "Liquidation";
+  /** On-chain figures; null until the line has settled on-chain. */
+  funded: string | null;
+  collateralValue: string | null;
+  priceStatus: string | null;
 }

@@ -49,6 +49,9 @@ export function resolvePokeSource(env: NodeJS.ProcessEnv = process.env): string 
   return source;
 }
 
+/** How long an envelope from {@link buildUnsignedTx} stays valid for submission. */
+export const UNSIGNED_TX_TIMEOUT_S = 300;
+
 /**
  * Builds an unsigned, Soroban-resource-prepared transaction envelope for a single contract
  * invocation and returns it as base64 XDR. Per PRD §9, Ballast never holds customer signing
@@ -61,7 +64,7 @@ export async function buildUnsignedTx(
   method: string,
   scArgs: xdr.ScVal[],
 ): Promise<string> {
-  const server = new rpc.Server(config.rpcUrl);
+  const server = new rpc.Server(config.rpcUrl, { allowHttp: config.rpcUrl.startsWith("http://") });
   const sourceAccount = await server.getAccount(sourcePublicKey);
 
   const tx = new TransactionBuilder(sourceAccount, {
@@ -69,7 +72,9 @@ export async function buildUnsignedTx(
     networkPassphrase: config.networkPassphrase,
   })
     .addOperation(new Contract(contractId).call(method, ...scArgs))
-    .setTimeout(60)
+    // Long enough for a person to read and approve it in a wallet; `services/api` gives up on
+    // an unsubmitted transaction a little after this (see its intent sweeper).
+    .setTimeout(UNSIGNED_TX_TIMEOUT_S)
     .build();
 
   // Simulates the invocation and attaches the resulting Soroban resource footprint/fee so the
@@ -93,7 +98,7 @@ export async function simulateRead<T = unknown>(
   method: string,
   scArgs: xdr.ScVal[],
 ): Promise<T> {
-  const server = new rpc.Server(config.rpcUrl);
+  const server = new rpc.Server(config.rpcUrl, { allowHttp: config.rpcUrl.startsWith("http://") });
   const sourceAccount = await server.getAccount(callerPublicKey);
 
   const tx = new TransactionBuilder(sourceAccount, {

@@ -37,7 +37,7 @@ export class OperatorPayoutSigner implements PayoutSigner {
     private readonly passphrase: string,
     private readonly kmsSigner: KmsSigner,
   ) {
-    this.rpcServer = new rpc.Server(rpcUrl);
+    this.rpcServer = new rpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith("http://") });
   }
 
   /** Resolves the operator signer per `PAYOUT_HOP_SIGNER_MODE` and builds an `OperatorPayoutSigner` around it. */

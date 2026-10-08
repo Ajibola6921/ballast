@@ -67,13 +67,31 @@ describe("runSyncCollateralJob", () => {
       ],
     };
     const db = makeDb(lines, pledges);
-    const creditLineClient = { syncCollateral: vi.fn().mockResolvedValue("unsigned-xdr") };
+    const creditLineClient = {
+      line: vi.fn().mockResolvedValue({ pledgedUnits: 0n }),
+      syncCollateral: vi.fn().mockResolvedValue("unsigned-xdr"),
+    };
 
     const result = await runSyncCollateralJob(db, creditLineClient as any, signer as any);
 
     // 600 + 400 = 1000.0000000 units, scaled 7 decimals -> 10_000_000_000n
     expect(creditLineClient.syncCollateral).toHaveBeenCalledWith("GKEEPER", 1n, 10_000_000_000n);
     expect(result).toEqual({ processed: 1, skipped: 0, errors: [] });
+  });
+
+  it("submits nothing when the on-chain figure already matches", async () => {
+    const lines = [{ id: "line-1", contractLineId: "1" }];
+    const db = makeDb(lines, { "line-1": [{ units: "1000.0000000", status: "active" }] });
+    const creditLineClient = {
+      line: vi.fn().mockResolvedValue({ pledgedUnits: 10_000_000_000n }),
+      syncCollateral: vi.fn(),
+    };
+
+    const result = await runSyncCollateralJob(db, creditLineClient as any, signer as any);
+
+    expect(creditLineClient.syncCollateral).not.toHaveBeenCalled();
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ processed: 0, skipped: 1, errors: [] });
   });
 
   it("skips lines with no on-chain contract_line_id yet", async () => {
@@ -90,7 +108,10 @@ describe("runSyncCollateralJob", () => {
   it("records an error and keeps going when the client call fails", async () => {
     const lines = [{ id: "line-1", contractLineId: "1" }];
     const db = makeDb(lines, { "line-1": [] });
-    const creditLineClient = { syncCollateral: vi.fn().mockRejectedValue(new Error("simulation failed")) };
+    const creditLineClient = {
+      line: vi.fn().mockResolvedValue({ pledgedUnits: 5n }),
+      syncCollateral: vi.fn().mockRejectedValue(new Error("simulation failed")),
+    };
 
     const result = await runSyncCollateralJob(db, creditLineClient as any, signer as any);
 

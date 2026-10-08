@@ -1,4 +1,11 @@
 #![cfg_attr(not(test), no_std)]
+// Contract entry points take their inputs as flat arguments (that's the on-chain interface), and
+// `#[contractimpl]` generates client functions with the same arity.
+#![allow(clippy::too_many_arguments)]
+// Events are published with `Events::publish`, which soroban-sdk now deprecates in favour of
+// `#[contractevent]`. Moving over changes how events are encoded on-chain, so it has to be done
+// together with the off-chain readers (services/indexer, services/ledger) and a redeploy.
+#![allow(deprecated)]
 
 //! `PledgeVault` (PRD §6.2, §6.3, §8): one position per `(line, asset)`. Escrow mode (custody
 //! mode A) holds the RWA token itself in this contract; issuer-lien and custodian-lien modes
@@ -235,7 +242,7 @@ impl PledgeVault {
 
         if config.custody_mode == CustodyMode::Escrow {
             let token_client = token::Client::new(&env, &asset);
-            token_client.transfer(&borrower, &muxed(&env.current_contract_address()), &units);
+            token_client.transfer(&borrower, muxed(&env.current_contract_address()), &units);
             position.units += units;
         } else {
             position.pending_lien_units += units;
@@ -276,7 +283,8 @@ impl PledgeVault {
             "pledge-vault: release exceeds pledged units"
         );
 
-        let guarded: GuardedPrice = PriceGuardClient::new(&env, &config.price_guard).guarded_price(&asset);
+        let guarded: GuardedPrice =
+            PriceGuardClient::new(&env, &config.price_guard).guarded_price(&asset);
         assert!(
             guarded.is_usable_for_new_risk(),
             "pledge-vault: price status is not Ok"
@@ -296,7 +304,7 @@ impl PledgeVault {
 
         if position.mode == CustodyMode::Escrow {
             let token_client = token::Client::new(&env, &asset);
-            token_client.transfer(&env.current_contract_address(), &muxed(&borrower), &units);
+            token_client.transfer(&env.current_contract_address(), muxed(&borrower), &units);
         }
 
         position.units = remaining_units;
@@ -313,7 +321,14 @@ impl PledgeVault {
     /// lien. `units` is load-bearing, not informational: it can never exceed what's still pending,
     /// so the gateway can confirm a pledge in partial tranches but never manufacture collateral
     /// beyond what the borrower actually pledged.
-    pub fn record_lien(env: Env, gateway: Address, line: u64, asset: Address, units: i128, lien_ref: Bytes) {
+    pub fn record_lien(
+        env: Env,
+        gateway: Address,
+        line: u64,
+        asset: Address,
+        units: i128,
+        lien_ref: Bytes,
+    ) {
         gateway.require_auth();
         let stored: Address = env
             .storage()
@@ -343,7 +358,14 @@ impl PledgeVault {
     /// release cleanly. `require_keeper` gates it; there's no LTV check here by design — this
     /// *is* the liquidation path, called by an off-chain keeper after `CreditLine::liquidate` has
     /// already confirmed and flagged the breach (see the module doc comment on this wiring gap).
-    pub fn liquidate(env: Env, keeper: Address, line: u64, asset: Address, units: i128, to: Address) {
+    pub fn liquidate(
+        env: Env,
+        keeper: Address,
+        line: u64,
+        asset: Address,
+        units: i128,
+        to: Address,
+    ) {
         let _ = keeper;
         access::require_keeper(&env);
         assert!(units > 0, "pledge-vault: units must be positive");
@@ -356,7 +378,7 @@ impl PledgeVault {
 
         if position.mode == CustodyMode::Escrow {
             let token_client = token::Client::new(&env, &asset);
-            token_client.transfer(&env.current_contract_address(), &muxed(&to), &units);
+            token_client.transfer(&env.current_contract_address(), muxed(&to), &units);
         }
 
         position.units -= units;
@@ -418,7 +440,9 @@ mod test {
                 assert!(from_bal >= amount, "mock-token: insufficient balance");
                 let to_key = DataKey::Balance(to_addr);
                 let to_bal: i128 = env.storage().instance().get(&to_key).unwrap_or(0);
-                env.storage().instance().set(&from_key, &(from_bal - amount));
+                env.storage()
+                    .instance()
+                    .set(&from_key, &(from_bal - amount));
                 env.storage().instance().set(&to_key, &(to_bal + amount));
             }
         }
@@ -583,13 +607,15 @@ mod test {
         let h = setup(500, 500 * PRICE_SCALE, PRICE_SCALE);
         h.token.mint(&h.borrower, &(1_000 * PRICE_SCALE));
 
-        h.vault.pledge(&h.borrower, &1, &h.asset, &(1_000 * PRICE_SCALE));
+        h.vault
+            .pledge(&h.borrower, &1, &h.asset, &(1_000 * PRICE_SCALE));
         assert_eq!(h.token.balance(&h.borrower), 0);
         assert_eq!(h.vault.position_units(&1, &h.asset), 1_000 * PRICE_SCALE);
 
         // Release 50 units: remaining 950 * 0.95 = $902.50 collateral against $500 debt ->
         // ~5540 bps, well within Healthy (<7000 bps).
-        h.vault.release(&h.borrower, &1, &h.asset, &(50 * PRICE_SCALE));
+        h.vault
+            .release(&h.borrower, &1, &h.asset, &(50 * PRICE_SCALE));
 
         assert_eq!(h.vault.position_units(&1, &h.asset), 950 * PRICE_SCALE);
         assert_eq!(h.token.balance(&h.borrower), 50 * PRICE_SCALE);
@@ -604,10 +630,12 @@ mod test {
         // another party's line id could drain that line's escrowed collateral to itself.
         let h = setup(500, 500 * PRICE_SCALE, PRICE_SCALE);
         h.token.mint(&h.borrower, &(1_000 * PRICE_SCALE));
-        h.vault.pledge(&h.borrower, &1, &h.asset, &(1_000 * PRICE_SCALE));
+        h.vault
+            .pledge(&h.borrower, &1, &h.asset, &(1_000 * PRICE_SCALE));
 
         let attacker = Address::generate(&h.env);
-        h.vault.release(&attacker, &1, &h.asset, &(50 * PRICE_SCALE));
+        h.vault
+            .release(&attacker, &1, &h.asset, &(50 * PRICE_SCALE));
     }
 
     #[test]
@@ -616,11 +644,13 @@ mod test {
         // 5% haircut, $900 debt, $1.00 price -> already close to the edge.
         let h = setup(500, 900 * PRICE_SCALE, PRICE_SCALE);
         h.token.mint(&h.borrower, &(1_000 * PRICE_SCALE));
-        h.vault.pledge(&h.borrower, &1, &h.asset, &(1_000 * PRICE_SCALE));
+        h.vault
+            .pledge(&h.borrower, &1, &h.asset, &(1_000 * PRICE_SCALE));
 
         // Releasing 950 leaves 50 units * 0.95 = $47.50 collateral against $900 debt: way past
         // liquidation (>9000 bps) -> must panic.
-        h.vault.release(&h.borrower, &1, &h.asset, &(950 * PRICE_SCALE));
+        h.vault
+            .release(&h.borrower, &1, &h.asset, &(950 * PRICE_SCALE));
     }
 
     #[test]
@@ -640,7 +670,8 @@ mod test {
             &CustodyMode::IssuerLien,
         );
 
-        h.vault.pledge(&h.borrower, &2, &h.asset, &(100 * PRICE_SCALE));
+        h.vault
+            .pledge(&h.borrower, &2, &h.asset, &(100 * PRICE_SCALE));
         // No token movement in lien mode, and the pledge doesn't count toward LTV yet — it's
         // pending gateway confirmation.
         assert_eq!(h.token.balance(&h.vault.address), 0);
@@ -654,7 +685,13 @@ mod test {
 
         // Keeper can liquidate a lien-mode position without any token transfer needed.
         let to = Address::generate(&h.env);
-        h.vault.liquidate(&Address::generate(&h.env), &2, &h.asset, &(100 * PRICE_SCALE), &to);
+        h.vault.liquidate(
+            &Address::generate(&h.env),
+            &2,
+            &h.asset,
+            &(100 * PRICE_SCALE),
+            &to,
+        );
         assert_eq!(h.vault.position_units(&2, &h.asset), 0);
     }
 
@@ -674,7 +711,8 @@ mod test {
             &CustodyMode::IssuerLien,
         );
 
-        h.vault.pledge(&h.borrower, &3, &h.asset, &(100 * PRICE_SCALE));
+        h.vault
+            .pledge(&h.borrower, &3, &h.asset, &(100 * PRICE_SCALE));
 
         let lien_ref = Bytes::from_slice(&h.env, b"lien-ref-456");
         // Only 100 units are pending; confirming 101 must panic rather than manufacture

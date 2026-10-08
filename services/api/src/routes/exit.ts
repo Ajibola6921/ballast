@@ -3,11 +3,13 @@ import { eq } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
 import type { OnChainExitQuote } from "@ballast/contract-clients";
 import { decimalStringToScaled, scaledToDecimalString } from "@ballast/domain-types";
+import type { ChainGateway } from "../chain.js";
 import type { ContractClients } from "../contract-clients.js";
+import { recordIntent } from "../intents.js";
 import { exitExecuteSchema, exitQuoteRequestSchema } from "../schemas.js";
 import { requireAsset, requireStellarAccount } from "./helpers.js";
 
-export function registerExitRoutes(app: FastifyInstance, db: Database, contracts: ContractClients): void {
+export function registerExitRoutes(app: FastifyInstance, db: Database, contracts: ContractClients, chain: ChainGateway): void {
   app.post("/v1/exit/quotes", async (request, reply) => {
     const body = exitQuoteRequestSchema.parse(request.body);
     const asset = await requireAsset(db, body.assetId);
@@ -24,7 +26,7 @@ export function registerExitRoutes(app: FastifyInstance, db: Database, contracts
         spreadBps: onChainQuote.spreadBps,
         usdcOut: scaledToDecimalString(onChainQuote.usdcOut),
         // `expiresAt` on-chain is Unix *seconds* (ledger timestamp); `Date` wants milliseconds.
-        expiresAt: new Date(onChainQuote.expiresAt * 1000),
+        expiresAt: new Date(Number(onChainQuote.expiresAt) * 1000),
         status: "open",
       })
       .returning();
@@ -69,6 +71,12 @@ export function registerExitRoutes(app: FastifyInstance, db: Database, contracts
       body.to,
     );
 
-    return reply.code(201).send({ xdr, quoteId: quote.id });
+    const txHash = await recordIntent(db, chain, {
+      xdr,
+      kind: "exit.execute",
+      refId: quote.id,
+      partyId: request.partyId,
+    });
+    return reply.code(201).send({ xdr, txHash, quoteId: quote.id });
   });
 }

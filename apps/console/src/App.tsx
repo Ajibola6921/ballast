@@ -4,6 +4,8 @@ import { Login } from "./pages/Login.tsx";
 import { ConsoleShell } from "./pages/ConsoleShell.tsx";
 import { BorrowerView } from "./pages/BorrowerView.tsx";
 import { LenderView } from "./pages/LenderView.tsx";
+import { ExitView } from "./pages/ExitView.tsx";
+import { RepoView } from "./pages/RepoView.tsx";
 
 export default function App() {
   return (
@@ -14,6 +16,8 @@ export default function App() {
           <Route index element={<Navigate to="/borrower" replace />} />
           <Route path="borrower" element={<BorrowerView />} />
           <Route path="lender" element={<LenderView />} />
+          <Route path="exit" element={<ExitView />} />
+          <Route path="repo" element={<RepoView />} />
         </Route>
       </Routes>
     </AuthProvider>

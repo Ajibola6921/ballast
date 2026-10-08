@@ -122,13 +122,7 @@ fn setup() -> Harness {
     let risk = Address::generate(&env);
 
     let desk = env.register(ExitDesk, ());
-    ExitDeskClient::new(&env, &desk).initialize(
-        &admin,
-        &pauser,
-        &keeper,
-        &price_publisher,
-        &risk,
-    );
+    ExitDeskClient::new(&env, &desk).initialize(&admin, &pauser, &keeper, &price_publisher, &risk);
 
     let price_guard = env.register(MockPriceGuard, ());
     let rwa = env.register(MockToken, ());
@@ -181,9 +175,15 @@ fn quote_with_ok_price_applies_spread() {
     // 1% spread on $1.00 -> $0.99 per unit.
     let expected_price = PRICE_SCALE * 9_900 / 10_000;
     assert_eq!(quote.price, expected_price);
-    assert_eq!(quote.usdc_out, 100 * PRICE_SCALE * expected_price / PRICE_SCALE);
+    assert_eq!(
+        quote.usdc_out,
+        100 * PRICE_SCALE * expected_price / PRICE_SCALE
+    );
     assert!(quote.usdc_out < 100 * PRICE_SCALE);
-    assert_eq!(quote.expires_at, h.env.ledger().timestamp() + QUOTE_TTL_SECONDS);
+    assert_eq!(
+        quote.expires_at,
+        h.env.ledger().timestamp() + QUOTE_TTL_SECONDS
+    );
 }
 
 #[test]
@@ -198,18 +198,16 @@ fn exit_happy_path_settles_both_legs() {
     let units = 100 * PRICE_SCALE;
     MockTokenClient::new(&h.env, &h.rwa).mint(&holder, &units);
 
-    let usdc_out = ExitDeskClient::new(&h.env, &h.desk).exit(
-        &holder,
-        &h.rwa,
-        &units,
-        &0,
-        &payout_to,
-    );
+    let usdc_out =
+        ExitDeskClient::new(&h.env, &h.desk).exit(&holder, &h.rwa, &units, &0, &payout_to);
 
     assert!(usdc_out > 0);
     assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&holder), 0);
     assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&h.desk), units);
-    assert_eq!(MockTokenClient::new(&h.env, &h.usdc).balance(&payout_to), usdc_out);
+    assert_eq!(
+        MockTokenClient::new(&h.env, &h.usdc).balance(&payout_to),
+        usdc_out
+    );
 }
 
 #[test]

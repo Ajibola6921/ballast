@@ -1,4 +1,7 @@
 #![cfg_attr(not(test), no_std)]
+// Contract entry points take their inputs as flat arguments (that's the on-chain interface), and
+// `#[contractimpl]` generates client functions with the same arity.
+#![allow(clippy::too_many_arguments)]
 
 //! `PriceGuard` (PRD §6.2, §6.4, §8): the median/band/staleness/halt rules that stand between a
 //! manipulated or stale price and a draw/exit/repo/liquidation. This is the contract that exists
@@ -237,8 +240,8 @@ mod alloc_free_sort {
             );
             let mut items = [0i128; 8];
             let len = values.len() as usize;
-            for i in 0..len {
-                items[i] = values.get(i as u32).unwrap();
+            for (i, item) in items.iter_mut().enumerate().take(len) {
+                *item = values.get(i as u32).unwrap();
             }
             SortBuf { items, len }
         }
@@ -274,7 +277,7 @@ fn within_band(values: &[i128], band_bps: u32) -> bool {
     if min <= 0 {
         return false;
     }
-    let deviation_bps = ((max - min) as i128 * 10_000) / min as i128;
+    let deviation_bps = ((max - min) * 10_000) / min;
     deviation_bps <= band_bps as i128
 }
 
@@ -332,7 +335,12 @@ impl PriceGuard {
     /// Admin-only. Registers/rotates the raw Ed25519 public key `asset`'s issuer signs NAV
     /// readings with — see the module doc comment. Required before `publish_nav` can succeed for
     /// `asset` while `require_nav_signature` is `true`.
-    pub fn configure_issuer_key(env: Env, admin: Address, asset: Address, issuer_pubkey: BytesN<32>) {
+    pub fn configure_issuer_key(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        issuer_pubkey: BytesN<32>,
+    ) {
         admin.require_auth();
         access::require_admin(&env);
         env.storage()
@@ -378,9 +386,10 @@ impl PriceGuard {
             env.crypto().ed25519_verify(&issuer_pubkey, &message, &sig);
         }
 
-        env.storage()
-            .instance()
-            .set(&DataKey::NavRecord(asset.clone()), &NavRecord { value, ts, sig });
+        env.storage().instance().set(
+            &DataKey::NavRecord(asset.clone()),
+            &NavRecord { value, ts, sig },
+        );
 
         let name = Symbol::new(&env, ISSUER_SOURCE);
         track_source_name(&env, &asset, &name);
@@ -390,7 +399,14 @@ impl PriceGuard {
     /// PRD §6.4's other inputs: the independent SEP-40 feed and the last observed redemption
     /// price (see the module doc comment on why these are pushed rather than cross-called).
     /// `source` is a caller-chosen tag, e.g. `redston` or `redemp`.
-    pub fn publish_source(env: Env, publisher: Address, asset: Address, source: Symbol, value: i128, ts: u64) {
+    pub fn publish_source(
+        env: Env,
+        publisher: Address,
+        asset: Address,
+        source: Symbol,
+        value: i128,
+        ts: u64,
+    ) {
         publisher.require_auth();
         access::require_price_publisher(&env);
         read_config(&env, &asset);
@@ -450,14 +466,15 @@ impl PriceGuard {
             };
         }
 
-        let mut plain_values: alloc_free_sort::SortBuf = alloc_free_sort::SortBuf::from(&fresh_values);
+        let mut plain_values: alloc_free_sort::SortBuf =
+            alloc_free_sort::SortBuf::from(&fresh_values);
         plain_values.sort();
         let len = plain_values.len();
         let median_value = plain_values.get(len / 2);
 
         let mut as_array: [i128; 8] = [0; 8];
-        for i in 0..len {
-            as_array[i] = plain_values.get(i);
+        for (i, slot) in as_array.iter_mut().enumerate().take(len) {
+            *slot = plain_values.get(i);
         }
         if !within_band(&as_array[..len], config.band_bps) {
             return GuardedPrice {
@@ -539,7 +556,11 @@ mod test {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger};
 
-    fn setup(band_bps: u32, daily_move_band_bps: u32, max_staleness_s: u64) -> (Env, PriceGuardClient<'static>, Address, Address, Address) {
+    fn setup(
+        band_bps: u32,
+        daily_move_band_bps: u32,
+        max_staleness_s: u64,
+    ) -> (Env, PriceGuardClient<'static>, Address, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -554,7 +575,13 @@ mod test {
         client.initialize(&admin, &pauser, &keeper, &price_publisher, &risk);
 
         let asset = Address::generate(&env);
-        client.configure_asset(&admin, &asset, &band_bps, &daily_move_band_bps, &max_staleness_s);
+        client.configure_asset(
+            &admin,
+            &asset,
+            &band_bps,
+            &daily_move_band_bps,
+            &max_staleness_s,
+        );
 
         // These tests exercise the median/band/staleness/halt logic, not signature verification
         // (which has its own dedicated tests below) — turn the check off so a zero-filled `sig`
@@ -581,7 +608,13 @@ mod test {
         (BytesN::from_array(env, &pubkey_bytes), signing_key)
     }
 
-    fn sign_nav(env: &Env, signing_key: &ed25519_dalek::SigningKey, code: &Bytes, ts: u64, value: i128) -> BytesN<64> {
+    fn sign_nav(
+        env: &Env,
+        signing_key: &ed25519_dalek::SigningKey,
+        code: &Bytes,
+        ts: u64,
+        value: i128,
+    ) -> BytesN<64> {
         use ed25519_dalek::Signer;
         let message = build_nav_message(env, code, ts, value);
         let mut message_bytes = [0u8; 256];
@@ -596,7 +629,14 @@ mod test {
         let (env, client, publisher, _risk, asset) = setup(50, 100, 3600);
         let code = asset_code(&env);
         let sig = BytesN::from_array(&env, &[0u8; 64]);
-        client.publish_nav(&publisher, &asset, &code, &SCALE, &env.ledger().timestamp(), &sig);
+        client.publish_nav(
+            &publisher,
+            &asset,
+            &code,
+            &SCALE,
+            &env.ledger().timestamp(),
+            &sig,
+        );
 
         let price = client.guarded_price(&asset);
         assert_eq!(price.status, PriceStatus::Degraded);
@@ -684,8 +724,8 @@ mod test {
     fn valid_issuer_signature_is_accepted() {
         let (env, client, publisher, _risk, asset) = setup(50, 10_000, 3600);
         let admin = Address::generate(&env); // note: distinct from setup()'s internal admin —
-        // configure_issuer_key/configure_signature_requirement mock_all_auths() so any address
-        // passes require_auth() in this test env; what matters here is the pubkey/signature match.
+                                             // configure_issuer_key/configure_signature_requirement mock_all_auths() so any address
+                                             // passes require_auth() in this test env; what matters here is the pubkey/signature match.
         let code = asset_code(&env);
         let (pubkey, signing_key) = test_issuer_keypair(&env);
         client.configure_issuer_key(&admin, &asset, &pubkey);

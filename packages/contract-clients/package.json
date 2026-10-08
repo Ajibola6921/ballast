@@ -14,7 +14,7 @@
   "dependencies": {
     "@ballast/domain-types": "workspace:*",
     "@ballast/network-config": "workspace:*",
-    "@stellar/stellar-sdk": "^13.1.0"
+    "@stellar/stellar-sdk": "^17.2.1"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",

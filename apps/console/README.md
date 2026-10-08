@@ -1,7 +1,11 @@
 # Ballast console
 
-Borrower and lender web consoles (PRD §5 Phase 1 "Consoles" row): positions, headroom, margin
-status, and the draw/repay/pledge/fund actions, talking to `services/api`.
+Web console for `services/api`, four views:
+
+- **Borrower**: lines, headroom, margin status; draw, repay, pledge, release.
+- **Lender**: open a credit line, fund it, watch exposure and margin status.
+- **Exit**: quote and execute an instant exit of an RWA position for USDC.
+- **Repo**: propose a repo as cash lender, accept one as cash borrower, unwind at maturity.
 
 Visual language: Tactical Telemetry (dark CRT terminal), per the `industrial-brutalist-ui` skill
 - this is a risk-monitoring console, not a marketing page, so it deliberately skips that skill's
@@ -9,9 +13,13 @@ landing-page rules.
 
 ## Signing model
 
-Ballast never holds customer signing keys (PRD §9). Every action here calls `services/api`, gets
-back **unsigned XDR**, and displays it in a copy-able panel with instructions to sign externally
-(`stellar tx sign`, a wallet, etc.) and submit. No secret key is ever entered into this app.
+Ballast never holds customer signing keys (PRD §9). Every action here calls `services/api` and
+gets back **unsigned XDR** plus the hash that transaction will have. The transaction panel
+(`components/XdrOutput.tsx`) then has Freighter sign it in the extension and posts the signed
+envelope to `POST /v1/tx/submit`, which sends it, waits for the ledger to close, and updates the
+books (see `services/api/src/intents.ts`). The raw XDR stays visible with a copy button for anyone
+who would rather sign elsewhere (`stellar tx sign`) - in that case `POST /v1/tx/:hash/settle`
+picks the result up afterwards. No secret key is ever entered into this app.
 
 ## Auth
 
@@ -31,6 +39,9 @@ the API directly (curl, a script).
 
 ## Running
 
+`scripts/dev-setup.sh` (repo root) writes this app's `.env` along with everything else, and
+`pnpm dev` at the root starts it on http://localhost:5173 next to the services. To run it alone:
+
 ```
 cp .env.example .env   # point VITE_API_URL at your running services/api;
                         # VITE_STELLAR_NETWORK_PASSPHRASE must match services/api's
@@ -38,6 +49,6 @@ cp .env.example .env   # point VITE_API_URL at your running services/api;
 pnpm dev
 ```
 
-Needs `services/api` running (which needs Postgres and at least one seeded `party` +
-`party_account` row linking a real Stellar account you control in Freighter), and the
-[Freighter](https://www.freighter.app/) browser extension installed for login.
+To log in, Freighter needs an account that is linked to a party. For the seeded testnet parties
+that means importing the deploy's `lender` or `borrower` key into Freighter
+(`stellar keys secret lender`) and switching Freighter to Testnet.

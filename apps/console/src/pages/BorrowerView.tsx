@@ -1,11 +1,18 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../lib/auth.tsx";
-import { api, type AssetSummary, type CreditLineDetail, type PledgeRow, type PositionsResult } from "../lib/api.ts";
+import {
+  api,
+  type AssetSummary,
+  type BuiltTx,
+  type CreditLineDetail,
+  type PledgeRow,
+  type PositionsResult,
+} from "../lib/api.ts";
 import { Panel } from "../components/Panel.tsx";
 import { Button } from "../components/Button.tsx";
-import { MarginBadge } from "../components/StatusBadge.tsx";
+import { MarginBadge, PriceStatusBadge } from "../components/StatusBadge.tsx";
 import { XdrOutput } from "../components/XdrOutput.tsx";
-import { bpsToPercent, formatScaledBigintString, toScaled } from "../lib/format.ts";
+import { bpsToPercent, formatDecimalString, formatScaledBigintString, toScaled } from "../lib/format.ts";
 
 export function BorrowerView() {
   const { session } = useAuth();
@@ -101,9 +108,9 @@ function BorrowerLineDetail({
   onChanged: () => void;
 }) {
   const { session } = useAuth();
-  const [xdr, setXdr] = useState<string | null>(null);
+  const [tx, setTx] = useState<BuiltTx | null>(null);
   const [drawAmount, setDrawAmount] = useState("");
-  const [drawTo, setDrawTo] = useState("");
+  const [drawTo, setDrawTo] = useState(session?.stellarAccount ?? "");
   const [repayAmount, setRepayAmount] = useState("");
   const [pledgeAssetId, setPledgeAssetId] = useState(assets[0]?.id ?? "");
   const [pledgeUnits, setPledgeUnits] = useState("");
@@ -139,6 +146,25 @@ function BorrowerLineDetail({
         <p className="mt-3 text-xs text-fg-dim">
           Headroom before the healthy threshold: <span className="text-fg">{bpsToPercent(Math.max(headroom, 0))}</span>
         </p>
+        <div className="mt-3 grid grid-cols-2 gap-3 border-t border-line pt-3 text-xs sm:grid-cols-4">
+          <Stat
+            label="Funded"
+            value={detail.funded ? formatScaledBigintString(detail.funded, detail.loanCcy) : "--"}
+          />
+          <Stat
+            label="Collateral value"
+            value={detail.collateralValue ? formatScaledBigintString(detail.collateralValue, "USD") : "--"}
+          />
+          <div className="col-span-2">
+            <div className="text-fg-dim uppercase tracking-wider">Oracle</div>
+            {detail.priceStatus ? <PriceStatusBadge status={detail.priceStatus} /> : <span className="text-fg-dim">--</span>}
+          </div>
+        </div>
+        {!detail.contractLineId && (
+          <p className="mt-3 text-xs text-fg-dim">
+            /// NOT ON-CHAIN YET. The lender still has to sign the opening transaction.
+          </p>
+        )}
       </Panel>
 
       <Panel title="Draw">
@@ -161,7 +187,7 @@ function BorrowerLineDetail({
               withBusy(async () => {
                 if (!session) return;
                 const res = await api.draw(session.token, detail.id, toScaled(drawAmount), drawTo);
-                setXdr(res.xdr);
+                setTx(res);
               })
             }
           >
@@ -184,7 +210,7 @@ function BorrowerLineDetail({
               withBusy(async () => {
                 if (!session) return;
                 const res = await api.repay(session.token, detail.id, toScaled(repayAmount));
-                setXdr(res.xdr);
+                setTx(res);
               })
             }
           >
@@ -225,7 +251,7 @@ function BorrowerLineDetail({
                   toScaled(pledgeUnits),
                   asset?.custodyMode ?? "escrow",
                 );
-                setXdr(res.xdr);
+                setTx(res);
               })
             }
           >
@@ -237,15 +263,15 @@ function BorrowerLineDetail({
             {pledges.map((p) => (
               <div key={p.id} className="flex items-center justify-between py-1.5">
                 <span className="text-fg-dim">
-                  {p.status} / {p.units} units
+                  {p.status} / {formatDecimalString(p.units)} units
                 </span>
                 <Button
-                  disabled={busy}
+                  disabled={busy || p.status !== "active"}
                   onClick={() =>
                     withBusy(async () => {
                       if (!session) return;
                       const res = await api.releasePledge(session.token, detail.id, p.id);
-                      setXdr(res.xdr);
+                      setTx(res);
                     })
                   }
                 >
@@ -258,7 +284,16 @@ function BorrowerLineDetail({
       </Panel>
 
       {actionError && <p className="text-xs text-accent">ERROR: {actionError}</p>}
-      {xdr && <XdrOutput xdr={xdr} onDismiss={() => { setXdr(null); onChanged(); }} />}
+      {tx && (
+        <XdrOutput
+          key={tx.txHash}
+          tx={tx}
+          onDismiss={() => {
+            setTx(null);
+            onChanged();
+          }}
+        />
+      )}
     </div>
   );
 }

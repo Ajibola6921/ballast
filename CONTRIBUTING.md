@@ -22,9 +22,12 @@ get started.
 git clone https://github.com/DevTobis/ballast.git
 cd ballast
 pnpm install
-cp .env.example .env   # fill in for local development
-pnpm dev
+scripts/dev-setup.sh testnet   # Postgres, .env, migrations, seed data - see scripts/README.md
+pnpm dev                       # every service + the console (http://localhost:5173)
+scripts/e2e-services.sh        # optional: drive the whole stack end to end
 ```
+
+Needs Node >= 22.12, pnpm, the Stellar CLI, and Docker or Podman (for Postgres).
 
 You'll also need [Rust](https://rustup.rs/) and the
 [Stellar CLI](https://developers.stellar.org/docs/build/smart-contracts/getting-started/setup) if
@@ -146,6 +149,7 @@ collateral).
 | `apps/console/` | TypeScript block; if the auth flow changed, also manually verify the Freighter connect flow in a browser |
 | Anything under `contracts/` | Rust block, and re-run `scripts/e2e-smoke.sh` if the change affects a call this repo's scripts exercise |
 | `packages/db/src/schema.ts` | TypeScript block + generate a migration |
+| A service's on-chain behaviour, `services/api` routes, or `@ballast/contract-clients` | TypeScript block, then `scripts/e2e-services.sh` against a running stack |
 | A deploy or smoke script | Syntax-check with `bash -n`, then run it for real against `local` before opening the PR |
 
 ---

@@ -120,8 +120,11 @@ export async function runPriceUpdateCycle(
         assetId: asset.id,
         guardedValue: scaledToDecimalString(guarded.value),
         status: guarded.status,
-        // jsonb can't hold bigint directly — serialize values to strings first.
-        sources: guarded.sources.map((s) => ({ ...s, value: s.value.toString() })),
+        // jsonb can't hold bigint directly, and a decoded reading carries more than one (its
+        // i128 `value` and its u64 `ts`) — stringify every bigint field, not just `value`.
+        sources: guarded.sources.map((s) =>
+          Object.fromEntries(Object.entries(s).map(([k, v]) => [k, typeof v === "bigint" ? v.toString() : v])),
+        ),
         ledger: 0, // filled in by the indexer once the on-chain tx is confirmed
       });
 

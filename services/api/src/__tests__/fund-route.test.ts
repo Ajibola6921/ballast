@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import jwt from "jsonwebtoken";
 import { schema } from "@ballast/db";
 import type { ApiConfig } from "../config.js";
+import type { ChainGateway } from "../chain.js";
 import type { ContractClients } from "../contract-clients.js";
 import { buildServer } from "../server.js";
 import { createFakeDb } from "./fake-db.js";
@@ -23,6 +24,8 @@ const LENDER_PARTY_ID = "44444444-4444-4444-4444-444444444444";
 const LENDER_ACCOUNT = "GLENDERACCOUNT";
 const LINE_ID = "55555555-5555-5555-5555-555555555555";
 
+const chain = { txHash: () => "fund-tx-hash" } as unknown as ChainGateway;
+
 function tokenFor(stellarAccount: string) {
   return jwt.sign({ sub: stellarAccount }, config.jwtSigningSecret);
 }
@@ -43,6 +46,7 @@ describe("POST /v1/credit-lines/:id/fund", () => {
       config,
       db,
       contracts: { creditLine: { fund } } as unknown as ContractClients,
+      chain,
     });
 
     const res = await app.inject({
@@ -53,7 +57,7 @@ describe("POST /v1/credit-lines/:id/fund", () => {
     });
 
     expect(res.statusCode).toBe(201);
-    expect(res.json()).toMatchObject({ xdr: "unsigned-fund-xdr" });
+    expect(res.json()).toMatchObject({ xdr: "unsigned-fund-xdr", txHash: "fund-tx-hash" });
     expect(fund).toHaveBeenCalledWith(LENDER_ACCOUNT, 1n, 100000000000n);
   });
 
@@ -76,6 +80,7 @@ describe("POST /v1/credit-lines/:id/fund", () => {
       config,
       db,
       contracts: { creditLine: { fund } } as unknown as ContractClients,
+      chain,
     });
 
     const res = await app.inject({

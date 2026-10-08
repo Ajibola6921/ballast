@@ -1,4 +1,11 @@
 #![cfg_attr(not(test), no_std)]
+// Contract entry points take their inputs as flat arguments (that's the on-chain interface), and
+// `#[contractimpl]` generates client functions with the same arity.
+#![allow(clippy::too_many_arguments)]
+// Events are published with `Events::publish`, which soroban-sdk now deprecates in favour of
+// `#[contractevent]`. Moving over changes how events are encoded on-chain, so it has to be done
+// together with the off-chain readers (services/indexer, services/ledger) and a redeploy.
+#![allow(deprecated)]
 
 //! `RepoDvP` (PRD §5 Phase 3, §8): bilateral repo of RWA tokens against USDC with atomic DvP on
 //! leg 1 and a scheduled unwind on leg 2.
@@ -16,6 +23,23 @@
 //! parties' wallets. That is enough to satisfy DvP atomicity (invariant 7) without this contract
 //! needing to track a USDC float, and it is a reasonable skeleton simplification to note for
 //! anyone extending this later.
+//!
+//! **Cash-leg authorization:** because the cash legs aren't escrowed, each one moves USDC out of
+//! the wallet of a party who is *not* signing that call, so each is pre-authorized with a token
+//! allowance by the call that party *does* sign:
+//!
+//! - Leg 1 pays out of the cash lender's wallet when the borrower calls `accept_and_settle`. The
+//!   lender's `propose` therefore `approve`s this contract for `cash_amount`, and
+//!   `accept_and_settle` (which refuses a proposal past its maturity) spends it with
+//!   `transfer_from`.
+//! - Leg 2 collects principal + interest from the cash borrower at maturity, possibly triggered
+//!   by the lender or the keeper. `accept_and_settle` therefore has the borrower `approve` this
+//!   contract for a ceiling on what leg 2 can owe (principal plus interest from the proposal to
+//!   maturity), valid until at least [`UNWIND_ALLOWANCE_GRACE_LEDGERS`] past maturity, and a
+//!   non-borrower `unwind` spends what is actually due out of that.
+//!
+//! One live proposal per (lender, token) at a time: an allowance is a single number per
+//! owner/spender pair, so a lender's second `propose` replaces the first one's allowance.
 //!
 //! **Skeleton simplification (default-close bookkeeping, PRD §5 Phase 3 "Fail path"):
 //! `default_close` gives the cash lender full title to the pledged RWA units and closes the
@@ -36,8 +60,7 @@ use ballast_common::{
     margin::{self, MarginState, MarginThresholds},
     pause::{self, PauseScope},
     price::GuardedPrice,
-    risk,
-    timelock,
+    risk, timelock,
 };
 use soroban_sdk::{
     contract, contractclient, contractimpl, contracttype, symbol_short, token, Address, BytesN,
@@ -47,6 +70,13 @@ use soroban_sdk::{
 /// Grace period after a margin call before `default_close` may act (PRD §5 Phase 1 "Top-up and
 /// cure": default 24h cure window, reused here for repo margin calls).
 pub const MARGIN_CURE_GRACE_SECONDS: u64 = 24 * 60 * 60;
+
+/// How long past maturity the borrower's leg-2 allowance stays spendable (about one week of
+/// ~5s ledgers), so a late keeper run can still unwind.
+pub const UNWIND_ALLOWANCE_GRACE_LEDGERS: u32 = 120_960;
+const SECONDS_PER_LEDGER: u64 = 5;
+/// About one day of ledgers; see [`allowance_expiry`].
+const ALLOWANCE_EXPIRY_BUCKET_LEDGERS: u32 = 17_280;
 
 const SECONDS_PER_YEAR: i128 = 365 * 24 * 60 * 60;
 const BPS_DENOMINATOR: i128 = 10_000;
@@ -99,6 +129,9 @@ pub struct RepoTrade {
     pub kind: RepoKind,
     pub maturity_at: u64,
     pub agreement_hash: BytesN<32>,
+    /// Ledger timestamp of `propose`. Fixes the size of the borrower's leg-2 allowance — see
+    /// `accept_and_settle`.
+    pub proposed_at: u64,
     pub status: RepoStatus,
     /// The ledger sequence number leg 1 settled at — the in-contract stand-in for a tx hash
     /// (contracts cannot see their own transaction hash).
@@ -132,7 +165,9 @@ fn read_trade(env: &Env, id: u64) -> RepoTrade {
 }
 
 fn write_trade(env: &Env, trade: &RepoTrade) {
-    env.storage().persistent().set(&DataKey::Trade(trade.id), trade);
+    env.storage()
+        .persistent()
+        .set(&DataKey::Trade(trade.id), trade);
 }
 
 fn read_usdc(env: &Env) -> Address {
@@ -145,6 +180,40 @@ fn read_usdc(env: &Env) -> Address {
 fn require_admin_is(env: &Env, admin: &Address) {
     let stored_admin = access::require_admin(env);
     assert_eq!(&stored_admin, admin, "repo-dvp: admin argument mismatch");
+}
+
+/// Principal plus interest over the trade's fixed term, i.e. exactly what `unwind` moves.
+fn total_due(trade: &RepoTrade, settled_at: u64) -> i128 {
+    let term_seconds = trade.maturity_at.saturating_sub(settled_at);
+    let interest = accrue_interest(trade.cash_amount, trade.rate_bps, term_seconds);
+    trade
+        .cash_amount
+        .checked_add(interest)
+        .expect("repo-dvp: overflow computing total due")
+}
+
+/// A ledger sequence at least `seconds_ahead` (plus `grace_ledgers`) from now for an allowance
+/// to expire at, capped at the furthest expiry the host accepts.
+///
+/// Rounded up to a whole [`ALLOWANCE_EXPIRY_BUCKET_LEDGERS`] on purpose. The `approve` this feeds
+/// is a nested call authorized by the transaction's signer, and that authorization covers the
+/// call's exact arguments as they were when the transaction was *simulated*. An expiry derived
+/// straight from the current ledger would come out different when the transaction actually
+/// executes a ledger or two later, and the host would reject the `approve` as unauthorized.
+/// Bucketing makes simulation and execution agree unless a bucket boundary falls between them.
+fn allowance_expiry(env: &Env, seconds_ahead: u64, grace_ledgers: u32) -> u32 {
+    let ledgers_ahead = (seconds_ahead / SECONDS_PER_LEDGER).min(u32::MAX as u64) as u32;
+    let sequence = env.ledger().sequence();
+    let earliest = sequence
+        .saturating_add(ledgers_ahead)
+        .saturating_add(grace_ledgers);
+    let bucketed = (earliest / ALLOWANCE_EXPIRY_BUCKET_LEDGERS)
+        .saturating_add(2)
+        .saturating_mul(ALLOWANCE_EXPIRY_BUCKET_LEDGERS);
+    let furthest = sequence
+        .saturating_add(env.storage().max_ttl())
+        .saturating_sub(1);
+    bucketed.min(furthest / ALLOWANCE_EXPIRY_BUCKET_LEDGERS * ALLOWANCE_EXPIRY_BUCKET_LEDGERS)
 }
 
 /// Simple interest: `cash_amount * rate_bps * elapsed_seconds / (365d) / 10_000`.
@@ -202,7 +271,10 @@ impl RepoDvp {
         thresholds: MarginThresholds,
     ) {
         require_admin_is(&env, &admin);
-        assert!(haircut_bps as i128 <= BPS_DENOMINATOR, "repo-dvp: haircut exceeds 100%");
+        assert!(
+            haircut_bps as i128 <= BPS_DENOMINATOR,
+            "repo-dvp: haircut exceeds 100%"
+        );
         env.storage().instance().set(
             &DataKey::AssetConfig(asset.clone()),
             &RepoAssetConfig {
@@ -238,6 +310,15 @@ impl RepoDvp {
             panic!("repo-dvp: maturity_at must be in the future");
         }
 
+        // Pre-authorize leg 1 (see the module docs): the lender signs this call, not the
+        // borrower's later `accept_and_settle`.
+        token::Client::new(&env, &read_usdc(&env)).approve(
+            &cash_lender,
+            &env.current_contract_address(),
+            &cash_amount,
+            &allowance_expiry(&env, maturity_at - env.ledger().timestamp(), 0),
+        );
+
         let id = timelock::next_id(&env);
         let trade = RepoTrade {
             id,
@@ -250,6 +331,7 @@ impl RepoDvp {
             kind,
             maturity_at,
             agreement_hash,
+            proposed_at: env.ledger().timestamp(),
             status: RepoStatus::Proposed,
             leg1_ledger: None,
             settled_at: None,
@@ -263,7 +345,7 @@ impl RepoDvp {
 
     /// Leg 1, atomic (PRD invariant 7): within this single function, `units` of `asset` move from
     /// `cash_borrower` into this contract, and `cash_amount` USDC moves from `cash_lender`
-    /// straight to `cash_borrower`. Both `token::Client::transfer` calls happen unconditionally,
+    /// straight to `cash_borrower` (out of the allowance `propose` granted). Both token calls happen unconditionally,
     /// with no early return between them — if either panics, the Soroban host aborts the whole
     /// invocation and neither leg's storage/token effects apply.
     pub fn accept_and_settle(env: Env, cash_borrower: Address, id: u64) {
@@ -277,19 +359,54 @@ impl RepoDvp {
         if trade.cash_borrower != cash_borrower {
             panic!("repo-dvp: caller is not the trade's cash borrower");
         }
+        // The lender's leg-1 allowance outlives maturity by up to a couple of days (its expiry is
+        // bucketed), so a stale proposal has to be refused here rather than by the token.
+        if env.ledger().timestamp() >= trade.maturity_at {
+            panic!("repo-dvp: proposal is past its maturity");
+        }
 
         let asset_client = token::Client::new(&env, &trade.asset);
-        asset_client.transfer(&cash_borrower, &to_muxed(&env.current_contract_address()), &trade.units);
+        asset_client.transfer(
+            &cash_borrower,
+            to_muxed(&env.current_contract_address()),
+            &trade.units,
+        );
 
         let usdc_client = token::Client::new(&env, &read_usdc(&env));
-        usdc_client.transfer(&trade.cash_lender, &to_muxed(&cash_borrower), &trade.cash_amount);
+        usdc_client.transfer_from(
+            &env.current_contract_address(),
+            &trade.cash_lender,
+            &cash_borrower,
+            &trade.cash_amount,
+        );
+
+        // Pre-authorize leg 2 (see the module docs): the borrower signs this call, so this is
+        // the one moment the contract can be granted the right to collect at maturity.
+        //
+        // Sized as if the trade had settled the moment it was proposed: a ceiling on what leg 2
+        // can owe (settlement is never earlier than the proposal) that, unlike the exact figure,
+        // doesn't depend on which ledger this call executes in. It's an argument to a nested
+        // authorized call, so it has to come out the same at simulation and at execution — see
+        // `allowance_expiry`.
+        let now = env.ledger().timestamp();
+        usdc_client.approve(
+            &cash_borrower,
+            &env.current_contract_address(),
+            &total_due(&trade, trade.proposed_at),
+            &allowance_expiry(
+                &env,
+                trade.maturity_at.saturating_sub(now),
+                UNWIND_ALLOWANCE_GRACE_LEDGERS,
+            ),
+        );
 
         trade.status = RepoStatus::Settled;
         trade.leg1_ledger = Some(env.ledger().sequence());
-        trade.settled_at = Some(env.ledger().timestamp());
+        trade.settled_at = Some(now);
         write_trade(&env, &trade);
 
-        env.events().publish((symbol_short!("settle"), id), trade.units);
+        env.events()
+            .publish((symbol_short!("settle"), id), trade.units);
     }
 
     /// Leg 2: either party may unwind at or after maturity; a keeper may do so as the fallback
@@ -312,28 +429,40 @@ impl RepoDvp {
             panic!("repo-dvp: not yet at maturity");
         }
 
-        let settled_at = trade.settled_at.expect("repo-dvp: trade has no settlement time");
-        let term_seconds = trade.maturity_at.saturating_sub(settled_at);
-        let interest = accrue_interest(trade.cash_amount, trade.rate_bps, term_seconds);
-        let total_due = trade
-            .cash_amount
-            .checked_add(interest)
-            .expect("repo-dvp: overflow computing total due");
+        let settled_at = trade
+            .settled_at
+            .expect("repo-dvp: trade has no settlement time");
+        let total_due = total_due(&trade, settled_at);
 
         let usdc_client = token::Client::new(&env, &read_usdc(&env));
-        usdc_client.transfer(&trade.cash_borrower, &to_muxed(&trade.cash_lender), &total_due);
+        if caller == trade.cash_borrower {
+            usdc_client.transfer(
+                &trade.cash_borrower,
+                to_muxed(&trade.cash_lender),
+                &total_due,
+            );
+        } else {
+            // The borrower didn't sign this call; spend the allowance they granted at settlement.
+            usdc_client.transfer_from(
+                &env.current_contract_address(),
+                &trade.cash_borrower,
+                &trade.cash_lender,
+                &total_due,
+            );
+        }
 
         let asset_client = token::Client::new(&env, &trade.asset);
         asset_client.transfer(
             &env.current_contract_address(),
-            &to_muxed(&trade.cash_borrower),
+            to_muxed(&trade.cash_borrower),
             &trade.units,
         );
 
         trade.status = RepoStatus::Unwound;
         write_trade(&env, &trade);
 
-        env.events().publish((symbol_short!("unwind"), id), total_due);
+        env.events()
+            .publish((symbol_short!("unwind"), id), total_due);
     }
 
     /// Cross-calls `PriceGuard` for the trade's asset and, if the current LTV of the pledged
@@ -355,7 +484,8 @@ impl RepoDvp {
             panic!("repo-dvp: price is not Ok, cannot evaluate margin");
         }
 
-        let collateral_value = risk::collateral_value(trade.units, guarded.value, config.haircut_bps);
+        let collateral_value =
+            risk::collateral_value(trade.units, guarded.value, config.haircut_bps);
 
         let now = env.ledger().timestamp();
         let settled_at = trade.settled_at.unwrap_or(now);
@@ -383,7 +513,8 @@ impl RepoDvp {
             trade.margin_call_amount = (target_collateral - collateral_value).max(0);
             trade.cure_deadline = Some(now + MARGIN_CURE_GRACE_SECONDS);
             write_trade(&env, &trade);
-            env.events().publish((symbol_short!("mcall"), id), trade.margin_call_amount);
+            env.events()
+                .publish((symbol_short!("mcall"), id), trade.margin_call_amount);
         }
     }
 
@@ -401,7 +532,9 @@ impl RepoDvp {
         if !trade.pending_margin_call {
             panic!("repo-dvp: no active margin call to default on");
         }
-        let deadline = trade.cure_deadline.expect("repo-dvp: margin call has no cure deadline");
+        let deadline = trade
+            .cure_deadline
+            .expect("repo-dvp: margin call has no cure deadline");
         if env.ledger().timestamp() < deadline {
             panic!("repo-dvp: cure window has not expired yet");
         }
@@ -411,14 +544,15 @@ impl RepoDvp {
         let asset_client = token::Client::new(&env, &trade.asset);
         asset_client.transfer(
             &env.current_contract_address(),
-            &to_muxed(&trade.cash_lender),
+            to_muxed(&trade.cash_lender),
             &trade.units,
         );
 
         trade.status = RepoStatus::Defaulted;
         write_trade(&env, &trade);
 
-        env.events().publish((symbol_short!("default"), id), trade.units);
+        env.events()
+            .publish((symbol_short!("default"), id), trade.units);
     }
 
     pub fn trade(env: Env, id: u64) -> RepoTrade {

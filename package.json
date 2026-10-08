@@ -3,7 +3,7 @@
   "private": true,
   "description": "Collateral and liquidity network for Stellar RWAs.",
   "engines": {
-    "node": ">=20",
+    "node": ">=22.12",
     "pnpm": ">=9"
   },
   "packageManager": "pnpm@10.22.0",

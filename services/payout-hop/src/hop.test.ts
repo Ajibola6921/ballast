@@ -59,7 +59,7 @@ describe("forwardPayout", () => {
 
     expect(result).toEqual({ hash: "fakehash123", status: "PENDING" });
     expect(signer.submittedTx?.memo.type).toBe(MemoText);
-    expect(signer.submittedTx?.memo.value?.toString()).toBe("customer-ref-123");
+    expect(Buffer.from(signer.submittedTx?.memo.value as Uint8Array).toString()).toBe("customer-ref-123");
 
     // exit_fill + a balanced pair of journal_entry legs (debit usdc_cash, credit operator:payout_hop)
     expect(inserted).toHaveLength(3);

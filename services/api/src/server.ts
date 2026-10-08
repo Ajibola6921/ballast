@@ -6,6 +6,7 @@ import type { Database } from "@ballast/db";
 import { loadApiConfig, type ApiConfig } from "./config.js";
 import { registerAuth } from "./auth.js";
 import { getDb } from "./db.js";
+import { getChainGateway, type ChainGateway } from "./chain.js";
 import { getContractClients, type ContractClients } from "./contract-clients.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerDevAuthRoutes } from "./routes/dev-auth.js";
@@ -15,11 +16,14 @@ import { registerExitRoutes } from "./routes/exit.js";
 import { registerRepoRoutes } from "./routes/repo.js";
 import { registerPositionRoutes } from "./routes/positions.js";
 import { registerReportRoutes } from "./routes/reports.js";
+import { registerPartyRoutes } from "./routes/parties.js";
+import { registerTxRoutes } from "./routes/tx.js";
 
 export interface BuildServerOptions {
   config?: ApiConfig;
   db?: Database;
   contracts?: ContractClients;
+  chain?: ChainGateway;
 }
 
 /**
@@ -31,6 +35,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const config = options.config ?? loadApiConfig();
   const db = options.db ?? getDb();
   const contracts = options.contracts ?? getContractClients();
+  const chain = options.chain ?? getChainGateway();
 
   const app = Fastify({ logger: false });
 
@@ -66,9 +71,11 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   }
 
   registerAssetRoutes(app, db);
-  registerCreditLineRoutes(app, db, contracts);
-  registerExitRoutes(app, db, contracts);
-  registerRepoRoutes(app, db, contracts);
+  registerCreditLineRoutes(app, db, contracts, chain);
+  registerExitRoutes(app, db, contracts, chain);
+  registerRepoRoutes(app, db, contracts, chain);
+  registerTxRoutes(app, db, chain, contracts);
+  registerPartyRoutes(app, db);
   registerPositionRoutes(app, db);
   registerReportRoutes(app, db);
 

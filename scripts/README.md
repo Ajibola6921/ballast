@@ -52,20 +52,68 @@ contract's state before assuming otherwise.
 This has been run for real against public testnet - see `TESTNET_DEPLOYMENT.md` at the repo root
 for the live contract IDs, role addresses, and e2e smoke-test result.
 
+## Running the full stack
+
+`deploy.sh` and `e2e-smoke.sh` only touch the contracts. To run the services and the console
+against a deployment:
+
+```
+scripts/dev-setup.sh testnet   # or `local`
+pnpm dev
+scripts/e2e-services.sh testnet
+scripts/e2e-liquidation.sh testnet
+```
+
+`deploy.sh` ends by calling `configure-desks.sh`, which configures `ExitDesk` (asset, spread,
+caps, a USDC float) and `RepoDvp` (cash token, asset) and sets up the trustlines and test cash the
+exit, repo and liquidation flows need. It can be re-run on its own against an existing deployment.
+
+`dev-setup.sh` starts a Postgres container (`ballast-pg`, Docker or Podman), writes the repo-root
+`.env` from `.env.<network>-deploy` plus the operator keys in the `stellar` CLI's identity store,
+writes `apps/console/.env`, applies migrations, and seeds one lender party, one borrower party and
+the test RWA (`packages/db/src/seed.ts`). It is safe to re-run, and keeps the ports and secrets
+already in `.env` - so if 3000-3002 are taken on your machine, change `API_PORT` /
+`ISSUER_GATEWAY_PORT` / `PAYOUT_HOP_PORT` there and re-run it. Every service loads the root `.env`
+itself, so `pnpm dev` needs no exported variables.
+
+`e2e-services.sh` plays both customers against the running stack: real SEP-10 login, every
+transaction built by `services/api`, signed locally with the lender's/borrower's key, and
+submitted back through `POST /v1/tx/submit`. It runs two scripts from `services/api/e2e/`:
+
+- `collateral-rail.ts`: open, fund, two pledges, wait for `services/keeper` to sync the collateral
+  and `services/price-guard` to publish an `Ok` price, draw, repay, release.
+- `exit-repo.ts`: an exit-desk quote and its execution; then a repo proposed by the lender,
+  accepted by the borrower, and unwound at maturity by `services/keeper` with nobody else signing.
+
+`e2e-liquidation.sh` runs `liquidation.ts`: the borrower draws to ~63% LTV, the mock price drops
+to $0.62, and from there only the services act - `price-guard` publishes, `margin-monitor` records
+the move into `Liquidation`, and `keeper` arms the breach, waits out the cure window, liquidates
+the line and sends the collateral to the lender. It is separate because it moves the price every
+line on the deployment sees: it widens `PriceGuard`'s daily-move band for the drill (a one-step
+38% drop would otherwise halt the price, which is the guard working) and restores both on exit.
+
+To use the console, import the deploy's `lender` or `borrower` key into Freighter
+(`stellar keys secret lender`), switch Freighter to the same network, and open
+http://localhost:5173.
+
 ## What this does and doesn't prove
 
-`deploy.sh` and `e2e-smoke.sh` drive the contracts directly via `stellar contract invoke`
-(each a real signed, submitted transaction) - they prove the six Rust contracts work together
-correctly on a live network, including the cross-contract calls (`PledgeVault.release` calling
-`CreditLine.borrower_of`/`ltv`, `CreditLine.draw` calling `PriceGuard.guarded_price`).
+`deploy.sh` and `e2e-smoke.sh` drive the contracts directly via `stellar contract invoke` - they
+prove the Rust contracts work together on a live network, including the cross-contract calls.
+`e2e-services.sh` and `e2e-liquidation.sh` prove the layer above: `services/api`, the keeper's
+jobs, `services/price-guard`'s publish cycle, `services/margin-monitor` and Postgres, against that
+same deployment.
 
-They do **not** exercise `services/api`, `services/keeper`, `services/price-guard`, or
-`apps/console` end-to-end against this network (that needs Postgres seeded with matching `party`/
-`asset`/`credit_line` rows and every service pointed at the same RPC + contract IDs this script
-prints into `.env.<network>-deploy`). `e2e-smoke.sh`'s "keeper syncs collateral" step calls
-`sync_collateral` directly rather than running `services/keeper`'s actual job, and its price
-publish step calls `PriceGuard` directly rather than running `services/price-guard`'s pipeline -
-both are named stand-ins for the real service, not the real service.
+Not covered:
+
+- **The console in a browser.** It builds and type-checks, and uses the same API calls the e2e
+  scripts do, but signing goes through the Freighter extension, which the scripts can't drive.
+- **Real prices and issuers.** `PRICE_GUARD_MODE=mock` and `ISSUER_GATEWAY_MODE=mock` are what
+  `dev-setup.sh` writes; the test RWA has no real issuer, and on-chain NAV signature checking is
+  disabled for this deploy (see `TESTNET_DEPLOYMENT.md`).
+- **Lien custody modes, repo margin calls and default-close, the payout hop, webhooks.** The code
+  is there and unit-tested; none of it is exercised against a live network.
+- **A margin call that is cured.** The liquidation drill goes straight through to liquidation.
 
 ## If a CLI flag doesn't match
 

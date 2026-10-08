@@ -2,7 +2,7 @@ import cron from "node-cron";
 import { createDatabase } from "@ballast/db";
 import { loadNetworkConfig, requireContractId } from "@ballast/network-config";
 import { createLogger } from "@ballast/observability";
-import { CreditLineClient, RepoDvpClient } from "@ballast/contract-clients";
+import { CreditLineClient, PledgeVaultClient, RepoDvpClient } from "@ballast/contract-clients";
 import { createOperatorSigner } from "@ballast/operator-signing";
 import { runRepoUnwindJob } from "./jobs/repoUnwind.js";
 import { runCureExpiryJob } from "./jobs/cureExpiry.js";
@@ -19,12 +19,26 @@ const creditLineClient = new CreditLineClient({
   network,
   contractId: requireContractId(network, "creditLine"),
 });
+const pledgeVaultClient = new PledgeVaultClient({
+  network,
+  contractId: requireContractId(network, "pledgeVault"),
+});
 const repoDvpClient = new RepoDvpClient({
   network,
   contractId: requireContractId(network, "repoDvp"),
 });
 
-async function runJob(name: string, fn: () => Promise<JobResult>): Promise<void> {
+// Every job signs with the one keeper account, and a Stellar account's transactions must land in
+// sequence-number order — two jobs building transactions at the same moment would both take the
+// same number and one would be rejected. So jobs queue up behind each other.
+let queue: Promise<void> = Promise.resolve();
+
+function runJob(name: string, fn: () => Promise<JobResult>): Promise<void> {
+  queue = queue.then(() => execute(name, fn));
+  return queue;
+}
+
+async function execute(name: string, fn: () => Promise<JobResult>): Promise<void> {
   logger.info({ job: name }, "keeper: job starting");
   try {
     const result = await fn();
@@ -45,14 +59,14 @@ async function runJob(name: string, fn: () => Promise<JobResult>): Promise<void>
 const REPO_UNWIND_CRON = process.env.KEEPER_REPO_UNWIND_CRON ?? "*/5 * * * *";
 const CURE_EXPIRY_CRON = process.env.KEEPER_CURE_EXPIRY_CRON ?? "*/5 * * * *";
 const INTEREST_ACCRUAL_CRON = process.env.KEEPER_INTEREST_ACCRUAL_CRON ?? "0 * * * *";
-// Runs before cure-expiry/interest-accrual in wall-clock terms often enough that CreditLine's LTV
-// view reflects recent pledges — every 5 minutes, same cadence as the other position-sensitive
-// jobs. Without this job, `pledged_units` never leaves 0 and every draw fails (see the job's doc
-// comment).
-const SYNC_COLLATERAL_CRON = process.env.KEEPER_SYNC_COLLATERAL_CRON ?? "*/5 * * * *";
+// Every minute: a pledge only counts toward a line's LTV (and so only unlocks a draw) once this
+// has pushed it on-chain, and the job submits nothing for a line that's already in sync.
+const SYNC_COLLATERAL_CRON = process.env.KEEPER_SYNC_COLLATERAL_CRON ?? "* * * * *";
 
 cron.schedule(REPO_UNWIND_CRON, () => runJob("repo-unwind", () => runRepoUnwindJob(db, repoDvpClient, signer)));
-cron.schedule(CURE_EXPIRY_CRON, () => runJob("cure-expiry", () => runCureExpiryJob(db, creditLineClient, signer)));
+cron.schedule(CURE_EXPIRY_CRON, () =>
+  runJob("cure-expiry", () => runCureExpiryJob(db, creditLineClient, pledgeVaultClient, signer)),
+);
 cron.schedule(INTEREST_ACCRUAL_CRON, () =>
   runJob("interest-accrual", () => runInterestAccrualJob(db, creditLineClient, signer)),
 );

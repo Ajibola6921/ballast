@@ -51,7 +51,7 @@ describe("runInterestAccrualJob", () => {
     const result = await runInterestAccrualJob(db, creditLineClient as any, signer as any);
 
     expect(creditLineClient.poke).toHaveBeenCalledTimes(1);
-    expect(creditLineClient.poke).toHaveBeenCalledWith(1n);
+    expect(creditLineClient.poke).toHaveBeenCalledWith(1n, signer.publicKey());
     expect(result).toEqual({ processed: 1, skipped: 1, errors: [] });
   });
 

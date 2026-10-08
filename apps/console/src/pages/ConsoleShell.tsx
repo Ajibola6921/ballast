@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Navigate, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth.tsx";
 import { shortAddress } from "../lib/format.ts";
 
@@ -11,10 +11,7 @@ export function ConsoleShell() {
   const { session, logout } = useAuth();
   const navigate = useNavigate();
 
-  if (!session) {
-    navigate("/login", { replace: true });
-    return null;
-  }
+  if (!session) return <Navigate to="/login" replace />;
 
   function onLogout() {
     logout();
@@ -23,15 +20,21 @@ export function ConsoleShell() {
 
   return (
     <div className="min-h-dvh">
-      <header className="flex items-center justify-between border-b border-line px-4 py-3">
-        <div className="flex items-center gap-4">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
+        <div className="flex flex-wrap items-center gap-4">
           <span className="text-sm font-bold uppercase tracking-tighter">BALLAST</span>
-          <nav className="flex gap-2">
+          <nav className="flex flex-wrap gap-2">
             <NavLink to="/borrower" className={tabClass}>
               Borrower
             </NavLink>
             <NavLink to="/lender" className={tabClass}>
               Lender
+            </NavLink>
+            <NavLink to="/exit" className={tabClass}>
+              Exit
+            </NavLink>
+            <NavLink to="/repo" className={tabClass}>
+              Repo
             </NavLink>
           </nav>
         </div>

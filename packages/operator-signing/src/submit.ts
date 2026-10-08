@@ -17,7 +17,7 @@ export async function submitSignedTx(
   pollIntervalMs = 1000,
   maxAttempts = 30,
 ): Promise<SubmitResult> {
-  const server = new rpc.Server(rpcUrl);
+  const server = new rpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith("http://") });
   const tx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
 
   const sendResult = await server.sendTransaction(tx);

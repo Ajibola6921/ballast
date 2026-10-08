@@ -46,7 +46,7 @@ describe("runRepoUnwindJob", () => {
   });
 
   it("unwinds a due repo trade, submits it, and updates status/leg2Tx on success", async () => {
-    const trade = { id: "123456789", status: "settled", maturityAt: new Date(Date.now() - 1000) };
+    const trade = { id: "trade-uuid-1", contractTradeId: "123456789", status: "settled", maturityAt: new Date(Date.now() - 1000) };
     const db = makeDb([trade]);
     const repoDvpClient = { unwind: vi.fn().mockResolvedValue("unsigned-xdr") };
     submitMock.mockResolvedValue({ hash: "hash-1", status: "SUCCESS" });
@@ -65,8 +65,8 @@ describe("runRepoUnwindJob", () => {
     expect(result).toEqual({ processed: 1, skipped: 0, errors: [] });
   });
 
-  it("skips (without erroring) a trade whose id doesn't parse as an on-chain numeric id", async () => {
-    const trade = { id: "not-a-numeric-uuid", status: "settled", maturityAt: new Date(Date.now() - 1000) };
+  it("skips (without erroring) a trade that has no on-chain trade id yet", async () => {
+    const trade = { id: "trade-uuid-2", contractTradeId: null, status: "settled", maturityAt: new Date(Date.now() - 1000) };
     const db = makeDb([trade]);
     const repoDvpClient = { unwind: vi.fn() };
 
@@ -77,7 +77,7 @@ describe("runRepoUnwindJob", () => {
   });
 
   it("records an error and keeps going when the client call fails", async () => {
-    const trade = { id: "42", status: "settled", maturityAt: new Date(Date.now() - 1000) };
+    const trade = { id: "42", contractTradeId: "42", status: "settled", maturityAt: new Date(Date.now() - 1000) };
     const db = makeDb([trade]);
     const repoDvpClient = { unwind: vi.fn().mockRejectedValue(new Error("rpc down")) };
 

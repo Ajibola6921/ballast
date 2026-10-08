@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "../lib/auth.tsx";
-import { api, type CreditLineDetail, type PositionsResult } from "../lib/api.ts";
+import { api, type AssetSummary, type BuiltTx, type CreditLineDetail, type PositionsResult } from "../lib/api.ts";
 import { Panel } from "../components/Panel.tsx";
 import { Button } from "../components/Button.tsx";
 import { MarginBadge } from "../components/StatusBadge.tsx";
 import { XdrOutput } from "../components/XdrOutput.tsx";
+import { INPUT } from "../components/Field.tsx";
 import { bpsToPercent, formatScaledBigintString, shortAddress, toScaled } from "../lib/format.ts";
 
 export function LenderView() {
@@ -12,7 +13,8 @@ export function LenderView() {
   const [positions, setPositions] = useState<PositionsResult | null>(null);
   const [details, setDetails] = useState<Record<string, CreditLineDetail>>({});
   const [fundAmounts, setFundAmounts] = useState<Record<string, string>>({});
-  const [xdr, setXdr] = useState<string | null>(null);
+  const [tx, setTx] = useState<BuiltTx | null>(null);
+  const [assets, setAssets] = useState<AssetSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -26,6 +28,7 @@ export function LenderView() {
       const mine = pos.creditLines.filter((l) => l.lenderId === session.partyId);
       const entries = await Promise.all(mine.map((l) => api.creditLine(session.token, l.id)));
       setDetails(Object.fromEntries(entries.map((d) => [d.id, d])));
+      setAssets((await api.assets(session.token)).assets);
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to load positions");
     } finally {
@@ -63,6 +66,8 @@ export function LenderView() {
         </div>
       </Panel>
 
+      <OpenLineForm assets={assets} onBuilt={setTx} />
+
       <Panel title="Lines / margin status">
         {loading && <p className="text-xs text-fg-dim">LOADING...</p>}
         {!loading && myLines.length === 0 && (
@@ -74,7 +79,7 @@ export function LenderView() {
             return (
               <div key={line.id} className="grid grid-cols-1 gap-2 py-3 sm:grid-cols-[1fr_1fr_1fr_1fr_auto] sm:items-center">
                 <span className="text-xs text-fg-dim">
-                  LINE / {line.id.slice(0, 8)}
+                  LINE / {line.id.slice(0, 8)} <span className="text-fg">{line.status.toUpperCase()}</span>
                   <br />
                   <span className="text-fg">BORROWER {shortAddress(line.borrowerId)}</span>
                 </span>
@@ -101,13 +106,13 @@ export function LenderView() {
                     className="w-24 border border-line bg-bg px-2 py-1 text-xs outline-none focus:border-fg"
                   />
                   <Button
-                    disabled={busyId === line.id || !fundAmounts[line.id]}
+                    disabled={busyId === line.id || !fundAmounts[line.id] || !line.contractLineId}
                     onClick={async () => {
                       setBusyId(line.id);
                       setError(null);
                       try {
                         const res = await api.fund(session.token, line.id, toScaled(fundAmounts[line.id]));
-                        setXdr(res.xdr);
+                        setTx(res);
                       } catch (err) {
                         setError(err instanceof Error ? err.message : "fund failed");
                       } finally {
@@ -124,7 +129,118 @@ export function LenderView() {
         </div>
       </Panel>
 
-      {xdr && <XdrOutput xdr={xdr} onDismiss={() => { setXdr(null); reload(); }} />}
+      {tx && (
+        <XdrOutput
+          key={tx.txHash}
+          tx={tx}
+          onDismiss={() => {
+            setTx(null);
+            reload();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+
+/** Opens a new line: the lender names the borrower by Stellar account, the API resolves the party. */
+function OpenLineForm({ assets, onBuilt }: { assets: AssetSummary[]; onBuilt: (tx: BuiltTx) => void }) {
+  const { session } = useAuth();
+  const [borrower, setBorrower] = useState("");
+  const [assetId, setAssetId] = useState("");
+  const [limit, setLimit] = useState("");
+  const [ratePct, setRatePct] = useState("7");
+  const [cureHours, setCureHours] = useState("24");
+  const [loanCcy, setLoanCcy] = useState("USDC");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const asset = assets.find((a) => a.id === assetId) ?? assets[0];
+  const rateBps = Math.round(Number(ratePct) * 100);
+  const cureWindowS = Math.round(Number(cureHours) * 3600);
+  const valid = Boolean(asset && borrower.trim() && limit && rateBps >= 0 && cureWindowS > 0);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!session || !asset) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const party = await api.partyByAccount(session.token, borrower.trim());
+      onBuilt(
+        await api.openCreditLine(session.token, {
+          lenderId: session.partyId,
+          borrowerId: party.partyId,
+          loanCcy: loanCcy.trim().toUpperCase(),
+          limit: toScaled(limit),
+          rateBps,
+          cureWindowS,
+          asset: asset.contractC,
+        }),
+      );
+      setBorrower("");
+      setLimit("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not build the opening transaction");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel title="Open credit line">
+      <form onSubmit={submit} className="grid grid-cols-1 gap-2 sm:grid-cols-6">
+        <label className="flex flex-col gap-1 text-xs uppercase tracking-wider text-fg-dim sm:col-span-3">
+          Borrower account
+          <input
+            value={borrower}
+            onChange={(e) => setBorrower(e.target.value)}
+            placeholder="G..."
+            spellCheck={false}
+            className={INPUT}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs uppercase tracking-wider text-fg-dim sm:col-span-2">
+          Collateral asset
+          <select value={asset?.id ?? ""} onChange={(e) => setAssetId(e.target.value)} className={INPUT}>
+            {assets.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.code} / haircut {bpsToPercent(a.haircutBps)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs uppercase tracking-wider text-fg-dim">
+          Loan ccy
+          <input value={loanCcy} onChange={(e) => setLoanCcy(e.target.value)} className={INPUT} />
+        </label>
+        <label className="flex flex-col gap-1 text-xs uppercase tracking-wider text-fg-dim sm:col-span-2">
+          Limit
+          <input
+            value={limit}
+            onChange={(e) => setLimit(e.target.value)}
+            placeholder="10000.00"
+            inputMode="decimal"
+            className={INPUT}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs uppercase tracking-wider text-fg-dim">
+          APR %
+          <input value={ratePct} onChange={(e) => setRatePct(e.target.value)} inputMode="decimal" className={INPUT} />
+        </label>
+        <label className="flex flex-col gap-1 text-xs uppercase tracking-wider text-fg-dim">
+          Cure window h
+          <input value={cureHours} onChange={(e) => setCureHours(e.target.value)} inputMode="decimal" className={INPUT} />
+        </label>
+        <div className="flex items-end sm:col-span-2">
+          <Button type="submit" disabled={busy || !valid} className="w-full">
+            {busy ? "BUILDING..." : "BUILD OPEN TX"}
+          </Button>
+        </div>
+      </form>
+      {error && <p className="mt-2 text-xs text-accent">ERROR: {error}</p>}
+      {assets.length === 0 && <p className="mt-2 text-xs text-fg-dim">No collateral assets are listed yet.</p>}
+    </Panel>
   );
 }

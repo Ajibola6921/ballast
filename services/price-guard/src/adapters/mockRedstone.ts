@@ -4,6 +4,7 @@
  * network call is made; swap for a real implementation behind `IndependentFeedAdapter`.
  */
 import type { IndependentFeedAdapter } from "./types.js";
+import { mockBasePrice } from "./mockPriceFile.js";
 
 const PRICE_SCALE = 10_000_000n;
 
@@ -14,9 +15,10 @@ export class MockRedstoneAdapter implements IndependentFeedAdapter {
   ) {}
 
   async fetchPrice(_assetCode: string): Promise<{ value: bigint; ts: number }> {
+    const base = mockBasePrice(_assetCode, this.baseValue);
     const wobbleBps = BigInt(Math.round((Math.random() - 0.5) * 2 * this.maxJitterBps));
     return {
-      value: this.baseValue + (this.baseValue * wobbleBps) / 10_000n,
+      value: base + (base * wobbleBps) / 10_000n,
       ts: Math.floor(Date.now() / 1000),
     };
   }

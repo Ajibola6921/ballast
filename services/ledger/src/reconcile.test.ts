@@ -3,7 +3,8 @@ import { runReconciliation } from "./reconcile.js";
 import { schema } from "@ballast/db";
 
 const ASSET_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-const CONTRACT_C = "CPLEDGEVAULT000000000000000000000000000000000000000000";
+const CONTRACT_C = "CASSETSAC0000000000000000000000000000000000000000000000";
+const VAULT_C = "CPLEDGEVAULT000000000000000000000000000000000000000000";
 
 function fakeDb(rows: {
   journalEntry?: unknown[];
@@ -47,7 +48,7 @@ describe("runReconciliation", () => {
       asset: [baseAsset],
       pledge: [{ assetId: ASSET_ID, status: "active", units: "1000.0000000" }],
       chainEvent: [
-        { contract: CONTRACT_C, topic: "pledge", data: { value: ["GASSET000000000000000000000000000000000000000000000000", "10000000000"] } }, // 1000.0000000 scaled
+        { contract: VAULT_C, topic: "pledged", data: { value: [CONTRACT_C, "10000000000"] } }, // 1000.0000000 scaled
       ],
     });
 
@@ -66,8 +67,8 @@ describe("runReconciliation", () => {
       pledge: [{ assetId: ASSET_ID, status: "active", units: "1000.0000000" }],
       // ...but the chain only shows 400 units pledged, net of a release. That's a real break.
       chainEvent: [
-        { contract: CONTRACT_C, topic: "pledge", data: { value: ["GASSET000000000000000000000000000000000000000000000000", "10000000000"] } },
-        { contract: CONTRACT_C, topic: "release", data: { value: ["GASSET000000000000000000000000000000000000000000000000", "6000000000"] } },
+        { contract: VAULT_C, topic: "pledged", data: { value: [CONTRACT_C, "10000000000"] } },
+        { contract: VAULT_C, topic: "released", data: { value: [CONTRACT_C, "6000000000"] } },
       ],
     });
 
@@ -89,7 +90,7 @@ describe("runReconciliation", () => {
       asset: [baseAsset],
       pledge: [{ assetId: ASSET_ID, status: "active", units: "1000.0000000" }],
       // off by 0.0000050 units, well inside TOLERANCE_UNITS
-      chainEvent: [{ contract: CONTRACT_C, topic: "pledge", data: { value: ["GASSET000000000000000000000000000000000000000000000000", "9999999950"] } }],
+      chainEvent: [{ contract: VAULT_C, topic: "pledged", data: { value: [CONTRACT_C, "9999999950"] } }],
     });
 
     const { breaks } = await runReconciliation(db);

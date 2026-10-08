@@ -11,6 +11,10 @@
  * admin-or-keeper-gated on-chain. This is a Postgres-vs-chain proxy, same caveat as
  * `services/ledger`'s reconciliation: it trusts our own indexed pledge rows as ground truth for
  * "what's really pledged," rather than reading `PledgeVault`'s contract storage directly.
+ *
+ * A line whose on-chain `pledged_units` already equals that total is left alone (one read, no
+ * transaction), which is what lets this job run every minute without paying a fee per line per
+ * run — and a borrower who just pledged shouldn't wait longer than that to be able to draw.
  */
 import { eq, and } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
@@ -45,6 +49,12 @@ export async function runSyncCollateralJob(
         (sum, p) => sum + decimalStringToScaled(p.units),
         0n,
       );
+
+      const onChain = await creditLineClient.line(BigInt(line.contractLineId));
+      if (BigInt(onChain.pledgedUnits) === totalUnits) {
+        result.skipped++;
+        continue;
+      }
 
       const unsignedXdr = await creditLineClient.syncCollateral(
         signer.publicKey(),

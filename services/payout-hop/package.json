@@ -6,8 +6,8 @@
   "main": "./dist/index.js",
   "scripts": {
     "build": "tsc -b",
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
+    "dev": "tsx watch --env-file-if-exists=../../.env src/index.ts",
+    "start": "node --env-file-if-exists=../../.env dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "lint": "echo 'no lint configured'"
@@ -18,7 +18,7 @@
     "@ballast/network-config": "workspace:*",
     "@ballast/observability": "workspace:*",
     "@ballast/operator-signing": "workspace:*",
-    "@stellar/stellar-sdk": "^13.1.0",
+    "@stellar/stellar-sdk": "^17.2.1",
     "fastify": "^5.1.0"
   },
   "devDependencies": {

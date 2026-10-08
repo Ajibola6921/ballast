@@ -13,7 +13,8 @@ export interface OnChainExitQuote {
   price: bigint;
   spreadBps: number;
   usdcOut: bigint;
-  expiresAt: number;
+  /** Unix seconds; a u64 on-chain, so it decodes as a bigint. */
+  expiresAt: bigint | number;
 }
 
 export class ExitDeskClient extends BaseContractClient {

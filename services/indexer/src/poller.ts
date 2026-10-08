@@ -14,6 +14,12 @@ const metrics = createConsoleMetricsSink("indexer");
 /** How many ledgers to look back on a cold start (no rows in `chain_event` yet). */
 const COLD_START_LOOKBACK_LEDGERS = 1000;
 
+/** Events requested per RPC call; a full page means there may be more behind it. */
+const PAGE_SIZE = 100;
+
+/** Stellar RPC rejects a `getEvents` filter naming more than this many contracts. */
+const MAX_CONTRACT_IDS_PER_FILTER = 5;
+
 /** Recursively replaces `bigint`s with strings so the result is safe to store in a jsonb column. */
 function toJsonSafe(value: unknown): unknown {
   if (typeof value === "bigint") return value.toString();
@@ -66,10 +72,22 @@ export async function pollOnce(
     startLedger = Math.max(1, sequence - COLD_START_LOOKBACK_LEDGERS);
   }
 
-  const { events, latestLedger } = await rpcServer.getEvents({
-    startLedger,
-    filters: [{ contractIds }],
-  });
+  // Drain every page before returning. The next poll resumes from `max(ledger) + 1`, so stopping
+  // after one full page would silently drop whatever was left in that page's last ledger.
+  const filters: { contractIds: string[] }[] = [];
+  for (let i = 0; i < contractIds.length; i += MAX_CONTRACT_IDS_PER_FILTER) {
+    filters.push({ contractIds: contractIds.slice(i, i + MAX_CONTRACT_IDS_PER_FILTER) });
+  }
+  const events: Awaited<ReturnType<RpcClient["getEvents"]>>["events"] = [];
+  let latestLedger = 0;
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await rpcServer.getEvents({ startLedger, filters, limit: PAGE_SIZE, cursor });
+    events.push(...page.events);
+    latestLedger = page.latestLedger;
+    cursor = page.events.at(-1)?.id;
+    if (page.events.length < PAGE_SIZE || !cursor) break;
+  }
 
   if (events.length > 0) {
     await db.insert(schema.chainEvent).values(

@@ -173,4 +173,7 @@ REPO_DVP_CID=${CID[repo-dvp]}
 EOF
 
 log "Wrote $OUT_FILE"
-log "Done. Run scripts/e2e-smoke.sh next."
+
+scripts/configure-desks.sh "$NETWORK"
+
+log "Done. Run scripts/e2e-smoke.sh next, or scripts/dev-setup.sh to bring up the services."

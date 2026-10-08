@@ -1,71 +1,165 @@
 /**
- * PRD §6.5: "Submits scheduled transactions: ... cure-window expiries."
+ * PRD §6.5: "Submits scheduled transactions: ... cure-window expiries." This is the whole
+ * liquidation path, start to finish.
  *
- * Finds open credit lines whose most recent `margin_event` moved them into `MarginCall` more
- * than `credit_line.cure_window_s` seconds ago, with no repayment recorded since (a pledge
- * top-up would show up as a later, healthier `margin_event` from margin-monitor's own recompute,
- * which this job also checks), and triggers `CreditLine.liquidate`.
+ * `services/margin-monitor` records each margin-state change as a `margin_event`. For every open
+ * line whose latest event is `MarginCall` or `Liquidation`, each run of this job:
  *
- * Route defaults to "transfer" (collateral moves directly to the lender) — PRD §6.4's
- * liquidation-order preference is issuer redemption first, but a real deployment would pick the
- * route per asset/situation from the lender console; this job just needs *a* sensible default.
+ *  1. re-reads the line's LTV from the contract (never trusting the recorded event alone — the
+ *     borrower may have repaid or topped up since) and leaves a recovered line alone;
+ *  2. `poke`s a line at liquidation level so the contract arms its breach flag. `CreditLine`
+ *     only liquidates on a second read in a later ledger than that flag (PRD §8 invariant 3), so
+ *     this is always at least one run ahead of step 3;
+ *  3. once the cure window (counted from when the line first left the healthy/warning band) has
+ *     run out and the breach is armed and still confirmed, calls `CreditLine.liquidate`, then
+ *     `PledgeVault.liquidate` for each pledged asset, sending the collateral to the lender — the
+ *     "transfer" route. `CreditLine.liquidate` only flips the line's status; it deliberately
+ *     doesn't move collateral itself (see that contract's module docs), so both calls are this
+ *     job's to make;
+ *  4. books it: pledges become `liquidated`, a `liquidation` row records the units and
+ *     transaction hashes, and the line becomes `liquidating` so no job picks it up again.
+ *
+ * A line that sits in `MarginCall` past its cure window without reaching the liquidation
+ * threshold is not liquidated — the contract refuses, by design — and stays on the lender
+ * console's watch list.
+ *
+ * Every step is safe to repeat: a run that dies after `CreditLine.liquidate` finds the line
+ * already `Liquidating` on-chain next time and carries on from the vault.
  */
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
+import { decimalStringToScaled, scaledToDecimalString } from "@ballast/domain-types";
 import { loadNetworkConfig } from "@ballast/network-config";
-import type { CreditLineClient } from "@ballast/contract-clients";
+import type { CreditLineClient, PledgeVaultClient } from "@ballast/contract-clients";
 import { submitSignedTx, type KmsSigner } from "@ballast/operator-signing";
 import { emptyResult, type JobResult } from "./types.js";
+
+const UNHEALTHY = new Set(["MarginCall", "Liquidation"]);
+
+/** How far back to look for the start of the current unhealthy stretch. */
+const EVENT_LOOKBACK = 50;
+
+async function signAndSubmit(signer: KmsSigner, unsignedXdr: string): Promise<string> {
+  const network = loadNetworkConfig();
+  const signedXdr = await signer.sign(unsignedXdr);
+  const submitted = await submitSignedTx(network.rpcUrl, network.networkPassphrase, signedXdr);
+  return submitted.hash;
+}
 
 export async function runCureExpiryJob(
   db: Database,
   creditLineClient: CreditLineClient,
+  pledgeVaultClient: PledgeVaultClient,
   signer: KmsSigner,
 ): Promise<JobResult> {
   const result = emptyResult();
+  const keeper = signer.publicKey();
 
   const openLines = await db.select().from(schema.creditLine).where(eq(schema.creditLine.status, "open"));
 
   for (const line of openLines) {
-    const [latestEvent] = await db
+    const events = await db
       .select()
       .from(schema.marginEvent)
       .where(eq(schema.marginEvent.creditLineId, line.id))
       .orderBy(desc(schema.marginEvent.createdAt))
-      .limit(1);
+      .limit(EVENT_LOOKBACK);
 
-    if (!latestEvent || latestEvent.toState !== "MarginCall") {
-      result.skipped++; // not currently in a margin call, or already moved on (cured/liquidated)
-      continue;
-    }
-
-    const cureDeadlineMs = latestEvent.createdAt.getTime() + line.cureWindowS * 1000;
-    if (Date.now() < cureDeadlineMs) {
-      result.skipped++; // still inside the cure window
-      continue;
-    }
-
-    const repayments = await db.select().from(schema.repayment).where(eq(schema.repayment.creditLineId, line.id));
-    const curedByRepayment = repayments.some((r) => r.createdAt.getTime() > latestEvent.createdAt.getTime());
-    if (curedByRepayment) {
-      result.skipped++;
-      continue;
-    }
-
-    if (!line.contractLineId) {
-      result.skipped++; // not yet opened on-chain
+    if (events.length === 0 || !UNHEALTHY.has(events[0].toState) || !line.contractLineId) {
+      result.skipped++; // healthy, or not on-chain yet
       continue;
     }
 
     try {
-      const unsignedXdr = await creditLineClient.liquidate(
-        signer.publicKey(),
-        BigInt(line.contractLineId),
-        "transfer",
-      );
-      const signedXdr = await signer.sign(unsignedXdr);
-      const network = loadNetworkConfig();
-      await submitSignedTx(network.rpcUrl, network.networkPassphrase, signedXdr);
+      const contractLine = BigInt(line.contractLineId);
+      const [view, onChain] = await Promise.all([
+        creditLineClient.ltv(contractLine),
+        creditLineClient.line(contractLine),
+      ]);
+      const alreadyLiquidating = onChain.status === "Liquidating";
+
+      if (!alreadyLiquidating) {
+        if (view.state !== "Liquidation" || view.priceStatus !== "Ok") {
+          result.skipped++; // cured, only at margin-call level, or no trustworthy price
+          continue;
+        }
+
+        if (onChain.breachLedger == null) {
+          await signAndSubmit(signer, await creditLineClient.poke(contractLine, keeper));
+          result.skipped++; // armed now; liquidation needs a later ledger, i.e. a later run
+          continue;
+        }
+
+        // The cure clock starts at the oldest event of the current unbroken unhealthy stretch.
+        let breachStart = events[0].createdAt;
+        for (const event of events) {
+          if (!UNHEALTHY.has(event.toState)) break;
+          breachStart = event.createdAt;
+        }
+        if (Date.now() < breachStart.getTime() + line.cureWindowS * 1000) {
+          result.skipped++; // still inside the cure window
+          continue;
+        }
+      }
+
+      const txHashes: string[] = [];
+      if (!alreadyLiquidating) {
+        txHashes.push(
+          await signAndSubmit(signer, await creditLineClient.liquidate(keeper, contractLine, "transfer")),
+        );
+      }
+
+      const [lenderAccount] = await db
+        .select()
+        .from(schema.partyAccount)
+        .where(eq(schema.partyAccount.partyId, line.lenderId))
+        .limit(1);
+      if (!lenderAccount) throw new Error(`no stellar account on file for lender ${line.lenderId}`);
+
+      const pledges = await db
+        .select()
+        .from(schema.pledge)
+        .where(and(eq(schema.pledge.creditLineId, line.id), eq(schema.pledge.status, "active")));
+
+      // The vault keeps one position per (line, asset), so pledges of the same asset move together.
+      const pledgesByAsset = new Map<string, typeof pledges>();
+      for (const pledge of pledges) {
+        pledgesByAsset.set(pledge.assetId, [...(pledgesByAsset.get(pledge.assetId) ?? []), pledge]);
+      }
+
+      let totalUnits = 0n;
+      for (const [assetId, assetPledges] of pledgesByAsset) {
+        const [asset] = await db.select().from(schema.asset).where(eq(schema.asset.id, assetId)).limit(1);
+        if (!asset) throw new Error(`asset ${assetId} not found`);
+
+        const units = assetPledges.reduce((sum, p) => sum + decimalStringToScaled(p.units), 0n);
+        txHashes.push(
+          await signAndSubmit(
+            signer,
+            await pledgeVaultClient.liquidate(
+              keeper,
+              contractLine,
+              asset.contractC,
+              units,
+              lenderAccount.stellarAccount,
+            ),
+          ),
+        );
+        totalUnits += units;
+        for (const pledge of assetPledges) {
+          await db.update(schema.pledge).set({ status: "liquidated" }).where(eq(schema.pledge.id, pledge.id));
+        }
+      }
+
+      await db.insert(schema.liquidation).values({
+        creditLineId: line.id,
+        route: "transfer",
+        units: scaledToDecimalString(totalUnits),
+        txHashes,
+        completedAt: new Date(),
+      });
+      await db.update(schema.creditLine).set({ status: "liquidating" }).where(eq(schema.creditLine.id, line.id));
+
       result.processed++;
     } catch (err) {
       result.errors.push({ id: line.id, message: err instanceof Error ? err.message : String(err) });

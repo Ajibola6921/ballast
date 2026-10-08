@@ -13,6 +13,8 @@ export interface EventFilter {
 }
 
 export interface RawChainEvent {
+  /** The RPC's paging token for this event; pass the last one back as `cursor` for the next page. */
+  id?: string;
   ledger: number;
   txHash: string;
   contractId: string;
@@ -27,7 +29,13 @@ export interface GetEventsResult {
 }
 
 export interface RpcClient {
-  getEvents(args: { startLedger: number; filters: EventFilter[]; limit?: number }): Promise<GetEventsResult>;
+  getEvents(args: {
+    startLedger: number;
+    filters: EventFilter[];
+    limit?: number;
+    /** Resume after this event id instead of from `startLedger` (the RPC accepts one or the other). */
+    cursor?: string;
+  }): Promise<GetEventsResult>;
   getLatestLedger(): Promise<{ sequence: number }>;
 }
 
@@ -37,23 +45,23 @@ export interface RpcClient {
  * this service needs is surfaced through `RpcClient`.
  */
 export function createRpcClient(rpcUrl: string): RpcClient {
-  const server = new rpc.Server(rpcUrl);
+  const server = new rpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith("http://") });
 
   return {
-    async getEvents({ startLedger, filters, limit }) {
-      const response = await server.getEvents({
-        startLedger,
-        filters: filters.map((f) => ({
-          type: "contract",
-          contractIds: f.contractIds,
-          topics: f.topics,
-        })),
-        limit,
-      });
+    async getEvents({ startLedger, filters, limit, cursor }) {
+      const rpcFilters = filters.map((f) => ({
+        type: "contract" as const,
+        contractIds: f.contractIds,
+        topics: f.topics,
+      }));
+      const response = await server.getEvents(
+        cursor ? { cursor, filters: rpcFilters, limit } : { startLedger, filters: rpcFilters, limit },
+      );
 
       return {
         latestLedger: response.latestLedger,
         events: response.events.map((e) => ({
+          id: e.id,
           ledger: e.ledger,
           txHash: e.txHash,
           contractId: e.contractId ? e.contractId.toString() : "",

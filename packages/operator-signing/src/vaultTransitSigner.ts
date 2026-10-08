@@ -104,7 +104,7 @@ export class VaultTransitSigner implements KmsSigner {
     const res = await this.fetchImpl(`${this.vaultAddr}/v1/transit/sign/${this.keyName}`, {
       method: "POST",
       headers: { "X-Vault-Token": this.vaultToken, "content-type": "application/json" },
-      body: JSON.stringify({ input: hash.toString("base64") }),
+      body: JSON.stringify({ input: Buffer.from(hash).toString("base64") }),
     });
     if (!res.ok) {
       throw new Error(

@@ -48,13 +48,11 @@ export const exitExecuteSchema = z.object({
   to: z.string(),
 });
 
-// Gap: `repo_trade` (unlike `credit_line.contractLineId`) has no column tracking the on-chain
-// numeric trade id `RepoDvp::propose` returns — it's only known once the indexer picks the
-// `TradeProposed` event back up. Until that's wired, the caller (who received it out-of-band, or
-// from a client-side simulation) supplies it directly for accept/unwind. Follow-up: add
-// `repo_trade.contract_trade_id` and have services/ledger backfill it.
+// `repo_trade.contract_trade_id` is filled in when the propose transaction settles (see
+// `intents.ts`), so accept/unwind normally need no body at all. Passing `contractTradeId`
+// explicitly still works, for a trade proposed outside this API.
 export const repoTradeActionSchema = z.object({
-  contractTradeId: bigintish,
+  contractTradeId: bigintish.optional(),
 });
 
 export const repoProposalSchema = z.object({

@@ -28,9 +28,9 @@ export async function runInterestAccrualJob(
     }
 
     try {
-      // `poke` is permissionless on-chain and resolves its own fee-paying source internally
-      // (see @ballast/contract-clients' resolvePokeSource) — it takes no caller argument.
-      const unsignedXdr = await creditLineClient.poke(BigInt(line.contractLineId));
+      // `poke` is permissionless on-chain, but the envelope's source account has to be the
+      // account that signs it — the keeper operator key here.
+      const unsignedXdr = await creditLineClient.poke(BigInt(line.contractLineId), signer.publicKey());
       const signedXdr = await signer.sign(unsignedXdr);
       const network = loadNetworkConfig();
       await submitSignedTx(network.rpcUrl, network.networkPassphrase, signedXdr);

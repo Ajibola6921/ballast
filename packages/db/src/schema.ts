@@ -263,6 +263,9 @@ export const repoTrade = pgTable("repo_trade", {
   maturityAt: timestamp("maturity_at", { withTimezone: true }).notNull(),
   agreementHash: text("agreement_hash").notNull(),
   status: text("status").notNull().default("proposed"),
+  /** On-chain `RepoDvp` trade id (the u64 `propose` returns), set once the propose tx settles —
+   * mirrors `credit_line.contract_line_id`. */
+  contractTradeId: text("contract_trade_id"),
   leg1Tx: text("leg1_tx"),
   leg2Tx: text("leg2_tx"),
 });
@@ -298,6 +301,33 @@ export const auditLog = pgTable("audit_log", {
   payload: jsonb("payload"),
   txHash: text("tx_hash"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * One row per unsigned transaction `services/api` hands out. Ballast never holds customer keys
+ * (PRD §9), so every state-changing route returns unsigned XDR and the caller signs it — which
+ * means the API can't know on its own whether, or with what result, that transaction landed.
+ * A transaction's hash covers its body but not its signatures, so it's known at build time: the
+ * API records what the transaction *means* (`kind` + `ref_id` + `payload`) under that hash, and
+ * `POST /v1/tx/submit` (or `POST /v1/tx/:hash/settle` for a transaction submitted elsewhere, e.g.
+ * with the CLI) looks the intent back up once the network reports a final status and applies it
+ * to the books. `CreditLine` emits no contract events, so this — not `chain_event` — is the only
+ * way `credit_line.contract_line_id`, `draw` and `repayment` rows ever get written.
+ */
+export const txIntent = pgTable("tx_intent", {
+  txHash: text("tx_hash").primaryKey(),
+  kind: text("kind").notNull(),
+  refId: uuid("ref_id"),
+  partyId: uuid("party_id")
+    .notNull()
+    .references(() => party.id),
+  payload: jsonb("payload"),
+  /** `pending` | `settled` | `failed` (closed, rejected on-chain) | `expired` (never submitted). */
+  status: text("status").notNull().default("pending"),
+  ledger: integer("ledger"),
+  error: text("error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  settledAt: timestamp("settled_at", { withTimezone: true }),
 });
 
 export const chainEvent = pgTable("chain_event", {

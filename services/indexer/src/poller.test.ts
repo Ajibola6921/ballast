@@ -44,6 +44,20 @@ describe("pollOnce", () => {
     expect(inserted).toHaveLength(0);
   });
 
+  it("splits more than 5 contracts across filters (the RPC rejects a larger filter)", async () => {
+    const db = fakeDb({ lastLedger: 10, inserted: [] });
+    const getEvents = vi.fn().mockResolvedValue({ latestLedger: 20, events: [] });
+    const ids = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"];
+
+    await pollOnce(db, fakeRpc({ getEvents }), ids);
+
+    expect(getEvents).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filters: [{ contractIds: ["C1", "C2", "C3", "C4", "C5"] }, { contractIds: ["C6", "C7"] }],
+      }),
+    );
+  });
+
   it("resumes from max(ledger) + 1 on a warm start and inserts one row per event", async () => {
     const inserted: Array<{ ledger: number; txHash: string; contract: string; topic: string; data: unknown }> = [];
     const db = fakeDb({ lastLedger: 4200, inserted });

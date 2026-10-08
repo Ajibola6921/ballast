@@ -32,6 +32,21 @@ export interface LtvView {
   priceStatus: PriceStatus;
 }
 
+/** The subset of the contract's `Line` struct (contracts/credit-line/src/lib.rs) callers read. */
+export interface OnChainLine {
+  lender: string;
+  borrower: string;
+  asset: string;
+  limit: bigint;
+  funded: bigint;
+  drawn: bigint;
+  pledgedUnits: bigint;
+  accruedInterest: bigint;
+  status: "Open" | "Liquidating";
+  /** Ledger at which `poke` first saw a liquidation-level breach; unset while there is none. */
+  breachLedger?: number | null;
+}
+
 export class CreditLineClient extends BaseContractClient {
   open(source: string, args: OpenCreditLineArgs): Promise<string> {
     return this.invoke(source, "open", [
@@ -80,6 +95,11 @@ export class CreditLineClient extends BaseContractClient {
     return this.read<LtvView>("ltv", [scU64(line)]);
   }
 
+  /** Read-only: the line's raw on-chain state (principal `drawn`, `funded`, `pledgedUnits`...). */
+  line(line: bigint): Promise<OnChainLine> {
+    return this.read<OnChainLine>("line", [scU64(line)]);
+  }
+
   /**
    * `poke` is a state-changing (though permissionless) call, so per Ballast's "never returns a
    * pre-signed tx" rule it returns unsigned XDR like every other write — despite the spec
@@ -87,9 +107,8 @@ export class CreditLineClient extends BaseContractClient {
    * "still returns unsigned XDR" comment. Honoring the comment/convention here. See
    * `resolvePokeSource` for how the fee-paying source account is resolved.
    */
-  poke(line: bigint): Promise<string> {
-    const source = resolvePokeSource();
-    return this.invoke(source, "poke", [scAddress(source), scU64(line)]);
+  poke(line: bigint, source: string = resolvePokeSource()): Promise<string> {
+    return this.invoke(source, "poke", [scU64(line)]);
   }
 
   liquidate(source: string, line: bigint, route: LiquidationRoute): Promise<string> {

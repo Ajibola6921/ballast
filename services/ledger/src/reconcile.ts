@@ -6,9 +6,13 @@
  * ## What this compares
  *
  * For each `asset` row: the sum of `pledge.units` in Postgres where `status = 'active'`, against
- * the net units implied by every `chain_event` row tagged with that asset's `contract_c` and a
- * `pledge` / `release` / `liquidate` topic (`+units` for `pledge`, `-units` for `release` and
- * `liquidate`, reading the amount out of the event's decoded `data.value`).
+ * the net units implied by every `pledged` / `released` / `liquidated` `chain_event` row whose
+ * event body names that asset (`+units` for `pledged`, `-units` for `released` and `liquidated`).
+ * Those events are emitted by `PledgeVault`, so `chain_event.contract` is the vault's address for
+ * every asset — the asset is identified by the first field of the event body, not by `contract`.
+ * (An earlier version filtered on `contract === asset.contract_c` and on `pledge`/`release`/
+ * `liquidate` topic names the contract never emits, so it matched no events at all and reported
+ * every active pledge as a break.)
  *
  * Separately (and only for the report, not for break detection), it sums `journal_entry`
  * debit/credit per `account`, so the nightly report shows the Postgres books' own internal
@@ -41,11 +45,11 @@ const alerter = createConsoleAlerter("ledger");
 /** Tolerance in raw scaled units (1n = 1e-7 of an asset unit) below which a diff isn't a break. */
 const TOLERANCE_UNITS = 100n;
 
-const PLEDGE_TOPICS = new Set(["pledge", "release", "liquidate"]);
+const PLEDGE_TOPICS = new Set(["pledged", "released", "liquidated"]);
 
 function topicDelta(topic: string, units: bigint): bigint {
-  if (topic === "pledge") return units;
-  if (topic === "release" || topic === "liquidate") return -units;
+  if (topic === "pledged") return units;
+  if (topic === "released" || topic === "liquidated") return -units;
   return 0n;
 }
 
@@ -99,9 +103,11 @@ export async function runReconciliation(db: Database): Promise<ReconciliationOut
       .filter((p) => p.assetId === asset.id && p.status === "active")
       .reduce((sum, p) => sum + decimalStringToScaled(p.units), 0n);
 
-    const relevantEvents = chainEventRows.filter(
-      (e) => e.contract === asset.contractC && PLEDGE_TOPICS.has(e.topic),
-    );
+    const relevantEvents = chainEventRows.filter((e) => {
+      if (!PLEDGE_TOPICS.has(e.topic)) return false;
+      const value = (e.data as { value?: unknown } | null)?.value;
+      return Array.isArray(value) && value[0] === asset.contractC;
+    });
     const chainUnits = relevantEvents.reduce((sum, e) => {
       // `data.value` is the decoded `(asset, units, ...)` event-body tuple — a plain array, with
       // units always at index 1 for `pledged`/`released`/`liquidated` (see the module doc above).
@@ -138,9 +144,9 @@ export async function runReconciliation(db: Database): Promise<ReconciliationOut
     ),
     scope: {
       compared:
-        "postgres pledge.units (status='active') per asset vs. chain_event rows tagged with that " +
-        "asset's contract_c and a pledge/release/liquidate topic, reading units from index 1 of " +
-        "each event's decoded (asset, units, ...) data.value tuple",
+        "postgres pledge.units (status='active') per asset vs. pledged/released/liquidated " +
+        "chain_event rows naming that asset at index 0 of the decoded (asset, units, ...) " +
+        "data.value tuple, reading units from index 1",
       deferred: [
         "no direct on-chain contract-balance introspection (this compares against our own indexed " +
           "chain_event log, not a fresh read of contract storage)",

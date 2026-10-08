@@ -1,4 +1,7 @@
 #![cfg_attr(not(test), no_std)]
+// Contract entry points take their inputs as flat arguments (that's the on-chain interface), and
+// `#[contractimpl]` generates client functions with the same arity.
+#![allow(clippy::too_many_arguments)]
 
 //! `Registry` (PRD §6.2, §8): asset configs, haircut parameters, role addresses, timelocked
 //! changes. Holds no funds — every other contract reads its `AssetConfig` (via a cross-contract
@@ -41,7 +44,9 @@ fn read_asset(env: &Env, asset: &Address) -> AssetConfig {
 }
 
 fn write_asset(env: &Env, asset: &Address, config: &AssetConfig) {
-    env.storage().instance().set(&DataKey::Asset(asset.clone()), config);
+    env.storage()
+        .instance()
+        .set(&DataKey::Asset(asset.clone()), config);
 }
 
 #[contract]
@@ -163,7 +168,10 @@ impl Registry {
             .haircut_base_bps
             .checked_add(add_bps)
             .expect("registry: haircut overflow");
-        assert!(new_haircut <= 10_000, "registry: haircut cannot exceed 100%");
+        assert!(
+            new_haircut <= 10_000,
+            "registry: haircut cannot exceed 100%"
+        );
         config.haircut_base_bps = new_haircut;
         write_asset(&env, &asset, &config);
     }
@@ -202,7 +210,9 @@ impl Registry {
             "registry: timelock has not elapsed"
         );
         pause::set_paused(&env, &pending.scope, false);
-        env.storage().temporary().remove(&DataKey::PendingUnpause(id));
+        env.storage()
+            .temporary()
+            .remove(&DataKey::PendingUnpause(id));
     }
 
     pub fn is_paused(env: Env, scope: PauseScope) -> bool {
@@ -264,7 +274,10 @@ mod test {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.execute_param(&id);
         }));
-        assert!(result.is_err(), "registry: execute_param should fail before 48h");
+        assert!(
+            result.is_err(),
+            "registry: execute_param should fail before 48h"
+        );
 
         env.ledger().with_mut(|l| {
             l.timestamp += ballast_common::timelock::TIMELOCK_DELAY_SECONDS + 1;
@@ -309,7 +322,10 @@ mod test {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.execute_unpause(&id);
         }));
-        assert!(result.is_err(), "registry: execute_unpause should fail before 48h");
+        assert!(
+            result.is_err(),
+            "registry: execute_unpause should fail before 48h"
+        );
         assert!(client.is_paused(&PauseScope::Draws));
 
         env.ledger().with_mut(|l| {

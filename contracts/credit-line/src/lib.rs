@@ -1,4 +1,7 @@
 #![cfg_attr(not(test), no_std)]
+// Contract entry points take their inputs as flat arguments (that's the on-chain interface), and
+// `#[contractimpl]` generates client functions with the same arity.
+#![allow(clippy::too_many_arguments)]
 
 //! `CreditLine` (PRD §6.2, §8): lender commitments, draws, repayments, interest accrual, LTV
 //! computation, the margin state machine, and the liquidation entry point. Holds USDC "in transit
@@ -42,8 +45,7 @@ use ballast_common::{
     risk,
 };
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, token, Address, BytesN, Env,
-    MuxedAddress,
+    contract, contractclient, contractimpl, contracttype, token, Address, BytesN, Env, MuxedAddress,
 };
 
 const SECONDS_PER_YEAR: i128 = 365 * 24 * 60 * 60;
@@ -160,8 +162,7 @@ fn compute_ltv(env: &Env, line: &Line) -> LtvView {
     let config = read_asset_config(env, &line.asset);
     let guarded = PriceGuardClient::new(env, &config.price_guard).guarded_price(&line.asset);
 
-    let debt =
-        line.drawn + line.accrued_interest + interest_delta(line, env.ledger().timestamp());
+    let debt = line.drawn + line.accrued_interest + interest_delta(line, env.ledger().timestamp());
     let collateral_value =
         risk::collateral_value(line.pledged_units, guarded.value, config.haircut_bps);
     let ltv_bps = risk::ltv_bps(debt, collateral_value);
@@ -247,7 +248,9 @@ impl CreditLine {
             .instance()
             .get(&DataKey::NextLineId)
             .unwrap_or(0);
-        env.storage().instance().set(&DataKey::NextLineId, &(id + 1));
+        env.storage()
+            .instance()
+            .set(&DataKey::NextLineId, &(id + 1));
 
         write_line(
             &env,
@@ -286,7 +289,7 @@ impl CreditLine {
         let config = read_asset_config(&env, &state.asset);
         token::Client::new(&env, &config.usdc).transfer(
             &lender,
-            &muxed(&env.current_contract_address()),
+            muxed(&env.current_contract_address()),
             &amount,
         );
 
@@ -320,7 +323,11 @@ impl CreditLine {
             state.borrower, borrower,
             "credit-line: not this line's borrower"
         );
-        assert_eq!(state.status, LineStatus::Open, "credit-line: line is not open");
+        assert_eq!(
+            state.status,
+            LineStatus::Open,
+            "credit-line: line is not open"
+        );
 
         let now = env.ledger().timestamp();
         state.accrued_interest += interest_delta(&state, now);
@@ -350,7 +357,7 @@ impl CreditLine {
 
         token::Client::new(&env, &config.usdc).transfer(
             &env.current_contract_address(),
-            &muxed(&to),
+            muxed(&to),
             &amount,
         );
 
@@ -385,7 +392,7 @@ impl CreditLine {
         let config = read_asset_config(&env, &state.asset);
         token::Client::new(&env, &config.usdc).transfer(
             &payer,
-            &muxed(&env.current_contract_address()),
+            muxed(&env.current_contract_address()),
             &amount,
         );
 
@@ -512,7 +519,9 @@ mod test {
                 assert!(from_bal >= amount, "mock-token: insufficient balance");
                 let to_key = DataKey::Balance(to_addr);
                 let to_bal: i128 = env.storage().instance().get(&to_key).unwrap_or(0);
-                env.storage().instance().set(&from_key, &(from_bal - amount));
+                env.storage()
+                    .instance()
+                    .set(&from_key, &(from_bal - amount));
                 env.storage().instance().set(&to_key, &(to_bal + amount));
             }
         }
@@ -637,7 +646,8 @@ mod test {
 
         // $500 draw against $950 collateral -> 5263 bps, Healthy (<7000).
         let to = Address::generate(&h.env);
-        h.credit_line.draw(&h.borrower, &id, &(500 * PRICE_SCALE), &to);
+        h.credit_line
+            .draw(&h.borrower, &id, &(500 * PRICE_SCALE), &to);
         assert_eq!(h.token.balance(&to), 500 * PRICE_SCALE);
 
         let line = h.credit_line.line(&id);
@@ -660,7 +670,8 @@ mod test {
 
         // $950 collateral value; drawing $900 -> ~9474 bps, past liquidation (>9000) -> panic.
         let to = Address::generate(&h.env);
-        h.credit_line.draw(&h.borrower, &id, &(900 * PRICE_SCALE), &to);
+        h.credit_line
+            .draw(&h.borrower, &id, &(900 * PRICE_SCALE), &to);
     }
 
     #[test]
@@ -672,7 +683,8 @@ mod test {
             .sync_collateral(&h.admin, &id, &(1_000 * PRICE_SCALE));
 
         let to = Address::generate(&h.env);
-        h.credit_line.draw(&h.borrower, &id, &(10 * PRICE_SCALE), &to);
+        h.credit_line
+            .draw(&h.borrower, &id, &(10 * PRICE_SCALE), &to);
     }
 
     #[test]
@@ -699,7 +711,7 @@ mod test {
         // But a further draw must not.
         let to = Address::generate(&h.env);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            h.credit_line.draw(&h.borrower, &id, &(1 * PRICE_SCALE), &to);
+            h.credit_line.draw(&h.borrower, &id, &PRICE_SCALE, &to);
         }));
         assert!(
             result.is_err(),

@@ -1,4 +1,11 @@
 #![cfg_attr(not(test), no_std)]
+// Contract entry points take their inputs as flat arguments (that's the on-chain interface), and
+// `#[contractimpl]` generates client functions with the same arity.
+#![allow(clippy::too_many_arguments)]
+// Events are published with `Events::publish`, which soroban-sdk now deprecates in favour of
+// `#[contractevent]`. Moving over changes how events are encoded on-chain, so it has to be done
+// together with the off-chain readers (services/indexer, services/ledger) and a redeploy.
+#![allow(deprecated)]
 
 //! `ExitDesk` (PRD §5 Phase 2, §8): swaps an RWA token for USDC in one atomic transaction. The
 //! quoted price is the guarded price minus an exit spread; the USDC comes from a Ballast Exit
@@ -167,9 +174,18 @@ impl ExitDesk {
         desk_inventory_cap: i128,
     ) {
         require_admin_is(&env, &admin);
-        assert!(spread_bps as i128 <= BPS_DENOMINATOR, "exit-desk: spread exceeds 100%");
-        assert!(per_holder_daily_cap > 0, "exit-desk: per_holder_daily_cap must be positive");
-        assert!(desk_inventory_cap > 0, "exit-desk: desk_inventory_cap must be positive");
+        assert!(
+            spread_bps as i128 <= BPS_DENOMINATOR,
+            "exit-desk: spread exceeds 100%"
+        );
+        assert!(
+            per_holder_daily_cap > 0,
+            "exit-desk: per_holder_daily_cap must be positive"
+        );
+        assert!(
+            desk_inventory_cap > 0,
+            "exit-desk: desk_inventory_cap must be positive"
+        );
 
         env.storage().instance().set(
             &DataKey::AssetConfig(asset.clone()),
@@ -199,7 +215,7 @@ impl ExitDesk {
         let usdc_client = token::Client::new(&env, &usdc);
         usdc_client.transfer(
             &admin_or_keeper,
-            &to_muxed(&env.current_contract_address()),
+            to_muxed(&env.current_contract_address()),
             &amount,
         );
 
@@ -262,7 +278,7 @@ impl ExitDesk {
         // unconditionally in this one call; a panic in either aborts the whole invocation and
         // neither leg applies.
         let rwa_client = token::Client::new(&env, &asset);
-        rwa_client.transfer(&holder, &to_muxed(&env.current_contract_address()), &units);
+        rwa_client.transfer(&holder, to_muxed(&env.current_contract_address()), &units);
 
         let usdc: Address = env
             .storage()
@@ -272,12 +288,14 @@ impl ExitDesk {
         let usdc_client = token::Client::new(&env, &usdc);
         usdc_client.transfer(
             &env.current_contract_address(),
-            &to_muxed(&to),
+            to_muxed(&to),
             &quote.usdc_out,
         );
 
         env.storage().persistent().set(&daily_key, &new_daily_used);
-        env.storage().persistent().set(&inventory_key, &new_inventory);
+        env.storage()
+            .persistent()
+            .set(&inventory_key, &new_inventory);
 
         env.events()
             .publish((symbol_short!("exit"), holder, asset), quote.usdc_out);

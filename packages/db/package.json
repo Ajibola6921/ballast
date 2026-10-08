@@ -11,7 +11,8 @@
     "test": "vitest run --passWithNoTests",
     "lint": "echo 'no lint configured'",
     "migrate:generate": "drizzle-kit generate",
-    "migrate": "tsx src/migrate.ts"
+    "migrate": "tsx --env-file-if-exists=../../.env src/migrate.ts",
+    "seed": "tsx --env-file-if-exists=../../.env src/seed.ts"
   },
   "dependencies": {
     "@ballast/domain-types": "workspace:*",
