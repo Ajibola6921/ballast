@@ -1,23 +1,44 @@
 import type { IssuerNavAdapter } from "./types.js";
-import { fetchIssuerNav, requireLiveConfig } from "./liveNavShared.js";
+import { getJson, trimTrailingSlash } from "./liveNavShared.js";
+import { decimalStringToScaled } from "../scaled.js";
+
+export const SPIKO_PUBLIC_API = "https://public-api.spiko.io/v0";
+
+/** Shape of `GET /net-asset-values/{shareClassSymbol}/latest` (docs.spiko.io/developers/public_api). */
+interface SpikoLatestNav {
+  day: string;
+  amount: { value: string; currency: string };
+  updatedAt: string;
+}
 
 /**
- * LIVE NAV adapter for Spiko. Reuses the same `SPIKO_API_BASE_URL`/`SPIKO_API_KEY` env vars
- * `services/issuer-gateway`'s live `SpikoAdapter` already established (see root `.env.example`),
- * hitting a NAV-specific endpoint (`GET {baseUrl}/v1/nav/{assetCode}`) rather than the back-office
- * lien/redemption endpoints. NOT live-verified end-to-end — see `liveNavShared.ts`'s doc comment.
+ * Spiko's public NAV API: no auth, NAV published once per business day. The asset code on Stellar
+ * is the share-class symbol (USTBL, EUTBL, UKTBL). EUR/GBP share classes need an FX leg that is
+ * not wired yet, so they are refused rather than priced at the wrong currency.
  */
 export class SpikoNavAdapter implements IssuerNavAdapter {
   private readonly baseUrl: string;
-  private readonly apiKey: string;
 
-  constructor(baseUrl: string, apiKey: string) {
-    const config = requireLiveConfig("Spiko", baseUrl, apiKey);
-    this.baseUrl = config.baseUrl;
-    this.apiKey = config.apiKey;
+  constructor(
+    baseUrl: string = SPIKO_PUBLIC_API,
+    private readonly fetchImpl: typeof fetch = fetch,
+  ) {
+    this.baseUrl = trimTrailingSlash(baseUrl);
   }
 
-  fetchNav(assetCode: string): Promise<{ value: bigint; ts: number; sig: Buffer }> {
-    return fetchIssuerNav(this.baseUrl, this.apiKey, assetCode);
+  async fetchNav(assetCode: string): Promise<{ value: bigint; ts: number }> {
+    const url = `${this.baseUrl}/net-asset-values/${encodeURIComponent(assetCode.toUpperCase())}/latest`;
+    const body = await getJson<SpikoLatestNav>(url, this.fetchImpl);
+
+    if (body.amount.currency !== "USD") {
+      throw new Error(
+        `spikoNavAdapter: ${assetCode} NAV is quoted in ${body.amount.currency}; FX conversion to USD is not configured`,
+      );
+    }
+    const updatedMs = Date.parse(body.updatedAt);
+    if (Number.isNaN(updatedMs)) {
+      throw new Error(`spikoNavAdapter: unparseable updatedAt "${body.updatedAt}" for ${assetCode}`);
+    }
+    return { value: decimalStringToScaled(body.amount.value), ts: Math.floor(updatedMs / 1000) };
   }
 }

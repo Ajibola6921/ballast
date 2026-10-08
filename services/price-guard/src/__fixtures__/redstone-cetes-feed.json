@@ -1,0 +1,6 @@
+{
+  "contractId": "CCYGBQZ5JKE2TGK2XNNVIZRKFEIT27NZADS3XJFSO4CCIH3LHIUP34LG",
+  "recordedFrom": "simulateTransaction on mainnet.sorobanrpc.com, 2026-10-08",
+  "decimals": "8",
+  "read_price_data": { "package_timestamp": "1791445540000", "price": "6575000", "write_timestamp": "1791445547000" }
+}

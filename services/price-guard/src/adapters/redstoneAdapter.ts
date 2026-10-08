@@ -1,27 +1,52 @@
 /**
- * LIVE independent feed adapter — RedStone's SEP-40 feed (PRD §6.4's "Check" source, weight 1).
- * Unlike the issuer NAV adapters, this is an ON-CHAIN CONTRACT READ, not a REST call: SEP-40
- * ("Interoperability Standards: Price Feeds") feed contracts are read via a `lastprice` method,
- * matching the same SEP-40-shaped alias convention this repo's own `PriceGuard.lastprice`
- * (contracts/price-guard/src/lib.rs) uses. Each asset has its own feed contract (per
- * `REDSTONE_FEED_CONTRACT_IDS`), so — unlike `PriceGuard.lastprice(asset: Address)`, which serves
- * many assets from one contract instance and so needs an asset argument — this calls the
- * per-asset feed contract's `lastprice` with NO arguments, matching a single-asset feed contract.
+ * Independent feed adapter reading RedStone's on-chain price feeds on Stellar (PRD §6.4's "Check"
+ * source, weight 1). Each asset has its own feed contract; verified against mainnet on 2026-10-08
+ * (CETES, USTRY, TESOURO, BENJI_ETHEREUM_FUNDAMENTAL) to expose:
  *
- * NOT live-verified end-to-end: no real RedStone Soroban feed contract address was available in
- * this environment (same caveat as the live issuer adapters) — this is protocol-correct against
- * the documented `simulateRead`-style read path this repo already uses elsewhere
- * (`packages/contract-clients/src/unsigned-tx.ts`), with the on-chain `PriceData` struct shape
- * (`{ price: i128, timestamp: u64 }`) assumed per SEP-40 convention.
+ *   decimals() -> u64                       (8)
+ *   read_price_data() -> PriceData { package_timestamp: u64 (ms), price: U256, write_timestamp: u64 (ms) }
+ *
+ * The repo prices in 1e7 fixed point and the contracts compare unix-seconds timestamps, so the
+ * price is rescaled from the feed's decimals and the timestamp converted from ms to s here.
  */
-import type { NetworkConfig } from "@ballast/network-config";
-import { loadNetworkConfig } from "@ballast/network-config";
+import { loadNetworkConfig, type NetworkConfig } from "@ballast/network-config";
 import { resolveSimulationSource, simulateRead } from "@ballast/contract-clients";
 import type { IndependentFeedAdapter } from "./types.js";
 
+const PRICE_SCALE_DECIMALS = 7;
+
+/** `simulateRead` camelCases struct keys, so the contract's `package_timestamp` arrives as `packageTimestamp`. */
 interface OnChainPriceData {
+  packageTimestamp: number | bigint;
   price: bigint;
-  timestamp: number | bigint;
+  writeTimestamp: number | bigint;
+}
+
+/** Rescales a feed price with `decimals` fractional digits to the repo's 1e7 fixed point. */
+export function rescalePrice(price: bigint, decimals: number): bigint {
+  const shift = decimals - PRICE_SCALE_DECIMALS;
+  if (shift === 0) return price;
+  if (shift > 0) return price / 10n ** BigInt(shift);
+  return price * 10n ** BigInt(-shift);
+}
+
+/**
+ * RedStone publishes its RWA feeds on mainnet only, so a testnet or local deployment must read
+ * them from there: `REDSTONE_RPC_URL` (+ `REDSTONE_NETWORK_PASSPHRASE`) point the oracle read at
+ * its own network while everything else keeps using `STELLAR_RPC_URL`.
+ */
+function oracleNetwork(env: NodeJS.ProcessEnv): NetworkConfig {
+  if (!env.REDSTONE_RPC_URL) return loadNetworkConfig(env);
+  if (!env.REDSTONE_NETWORK_PASSPHRASE) {
+    throw new Error("redstoneAdapter: REDSTONE_RPC_URL is set but REDSTONE_NETWORK_PASSPHRASE is not");
+  }
+  return {
+    network: "mainnet",
+    rpcUrl: env.REDSTONE_RPC_URL,
+    horizonUrl: "",
+    networkPassphrase: env.REDSTONE_NETWORK_PASSPHRASE,
+    contracts: {},
+  };
 }
 
 export class RedstoneAdapter implements IndependentFeedAdapter {
@@ -39,32 +64,24 @@ export class RedstoneAdapter implements IndependentFeedAdapter {
       );
     }
 
-    const network: NetworkConfig = loadNetworkConfig(this.env);
-    const callerPublicKey = resolveSimulationSource(this.env);
+    const network = oracleNetwork(this.env);
+    const caller = resolveSimulationSource(this.env);
 
-    const result = await simulateRead<OnChainPriceData | null>(
-      network,
-      callerPublicKey,
-      contractId,
-      "lastprice",
-      [],
-    );
+    const [data, decimals] = await Promise.all([
+      simulateRead<OnChainPriceData>(network, caller, contractId, "read_price_data", []),
+      simulateRead<bigint | number>(network, caller, contractId, "decimals", []),
+    ]);
 
-    if (result == null) {
-      throw new Error(
-        `redstoneAdapter: "lastprice" returned no data for asset code "${assetCode}" (feed contract ${contractId})`,
-      );
-    }
-
-    return { value: BigInt(result.price), ts: Number(result.timestamp) };
+    return {
+      value: rescalePrice(BigInt(data.price), Number(decimals)),
+      ts: Math.floor(Number(data.packageTimestamp) / 1000),
+    };
   }
 }
 
 /**
- * Parses `REDSTONE_FEED_CONTRACT_IDS` — a JSON map `assetCode -> feed contract id`, e.g.
- * `{"USDY":"C...","deJTRSY":"C..."}`. Mirrors the JSON-map-env-var parsing style
- * `INSTITUTION_API_KEYS` uses in `services/api/src/config.ts` (try/catch JSON.parse, throw a
- * clear error rather than silently ignoring malformed input).
+ * Parses `REDSTONE_FEED_CONTRACT_IDS` — a JSON map `assetCode -> feed contract id`. Throws on
+ * malformed JSON rather than silently ignoring it.
  */
 export function loadRedstoneFeedContractIds(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   if (!env.REDSTONE_FEED_CONTRACT_IDS) {

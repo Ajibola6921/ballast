@@ -1,34 +1,59 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { Keypair } from "@stellar/stellar-sdk";
 
-const { fireSpy } = vi.hoisted(() => ({ fireSpy: vi.fn() }));
+const { fireSpy, simulateReadMock } = vi.hoisted(() => ({ fireSpy: vi.fn(), simulateReadMock: vi.fn() }));
 
 vi.mock("@ballast/observability", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@ballast/observability")>();
-  return {
-    ...actual,
-    createConsoleAlerter: () => ({ fire: fireSpy }),
-  };
+  return { ...actual, createConsoleAlerter: () => ({ fire: fireSpy }) };
+});
+vi.mock("@ballast/contract-clients", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ballast/contract-clients")>();
+  return { ...actual, resolveSimulationSource: () => "GSIMULATION", simulateRead: simulateReadMock };
 });
 
 const { runPriceUpdateCycle } = await import("./pipeline.js");
-const { MOCK_ISSUER_NAV_PUBLIC_KEY_BASE64 } = await import("./adapters/mockIssuers.js");
+const { createRawSecretSigner } = await import("@ballast/operator-signing");
+const { verifyNavSignature } = await import("./navSignature.js");
+const { attestorPublicKeyBase64 } = await import("./navAttestor.js");
 type AssetConfig = import("@ballast/domain-types").AssetConfig;
 
-/**
- * `runPriceUpdateCycle` resolves adapters via the registry (`PRICE_GUARD_MODE`, default "mock")
- * and verifies the mock adapters' real Ed25519 signatures against `ISSUER_NAV_PUBLIC_KEYS` — so
- * tests pass this `testEnv` (rather than mutating global `process.env`) to exercise the real
- * verification path instead of a stub.
- */
-function makeTestEnv(overrides: Partial<NodeJS.ProcessEnv> = {}): NodeJS.ProcessEnv {
-  return {
-    ISSUER_NAV_PUBLIC_KEYS: JSON.stringify({
-      spiko: MOCK_ISSUER_NAV_PUBLIC_KEY_BASE64,
-      etherfuse: MOCK_ISSUER_NAV_PUBLIC_KEY_BASE64,
-      franklin: MOCK_ISSUER_NAV_PUBLIC_KEY_BASE64,
-    }),
+/** Responses recorded from the live endpoints on 2026-10-08 (see ./__fixtures__). */
+const fixture = (name: string) => JSON.parse(readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url), "utf8"));
+const redstoneCetes = fixture("redstone-cetes-feed.json");
+
+const TEST_ENV = {
+  STELLAR_RPC_URL: "https://rpc.example",
+  STELLAR_HORIZON_URL: "https://horizon.example",
+  STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+  REDSTONE_FEED_CONTRACT_IDS: JSON.stringify({ CETES: redstoneCetes.contractId }),
+} as NodeJS.ProcessEnv;
+
+function jsonResponse(body: unknown, status = 200) {
+  return { ok: status < 400, status, statusText: "", json: async () => body, text: async () => JSON.stringify(body) };
+}
+
+/** Routes the issuer HTTP calls to the recorded responses; everything else is a 404. */
+function stubIssuerHttp(overrides: Record<string, ReturnType<typeof jsonResponse>> = {}) {
+  const routes: Record<string, ReturnType<typeof jsonResponse>> = {
+    "https://api.etherfuse.com/lookup/tokens/cost/CETES": jsonResponse(fixture("etherfuse-cetes-cost.json")),
+    "https://public-api.spiko.io/v0/net-asset-values/USTBL/latest": jsonResponse(fixture("spiko-ustbl-latest.json")),
     ...overrides,
-  } as NodeJS.ProcessEnv;
+  };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => routes[url] ?? jsonResponse({}, 404)));
+}
+
+function stubRedstone() {
+  simulateReadMock.mockImplementation(async (_n, _c, _id, method: string) =>
+    method === "decimals"
+      ? BigInt(redstoneCetes.decimals)
+      : {
+          packageTimestamp: BigInt(redstoneCetes.read_price_data.package_timestamp),
+          price: BigInt(redstoneCetes.read_price_data.price),
+          writeTimestamp: BigInt(redstoneCetes.read_price_data.write_timestamp),
+        },
+  );
 }
 
 function makeDb() {
@@ -40,9 +65,9 @@ function makeDb() {
 function makeAsset(overrides: Partial<AssetConfig> = {}): AssetConfig {
   return {
     id: "asset-1",
-    code: "SPIKO",
+    code: "CETES",
     issuerG: "GISSUER",
-    issuerCode: "spiko",
+    issuerCode: "etherfuse",
     contractC: "CASSETCONTRACT",
     standard: "classic_sac",
     yieldType: "accumulating",
@@ -60,232 +85,157 @@ function makeAsset(overrides: Partial<AssetConfig> = {}): AssetConfig {
   };
 }
 
-function makeSigner() {
+function makeClient(guarded: Record<string, unknown> = {}) {
   return {
-    publicKey: vi.fn().mockReturnValue("GPUBLISHER"),
-    sign: vi.fn().mockImplementation(async (xdr: string) => `signed:${xdr}`),
+    publishNav: vi.fn().mockResolvedValue("unsigned-nav-xdr"),
+    publishFeed: vi.fn().mockResolvedValue("unsigned-feed-xdr"),
+    guardedPrice: vi.fn().mockResolvedValue({
+      asset: "CASSETCONTRACT",
+      value: 657_660n,
+      status: "Ok",
+      ts: 1_791_447_179,
+      sources: [{ name: "issuer_nav", value: 657_660n, observedAt: 1_791_447_179, stale: false }],
+      ...guarded,
+    }),
   };
 }
 
+const keypair = Keypair.random();
+const signer = createRawSecretSigner(keypair.secret(), TEST_ENV.STELLAR_NETWORK_PASSPHRASE!);
+const sendSigner = {
+  publicKey: () => signer.publicKey(),
+  signMessage: (m: Uint8Array) => signer.signMessage(m),
+  sign: vi.fn(async (xdr: string) => `signed:${xdr}`),
+};
+
 beforeEach(() => {
   fireSpy.mockClear();
+  sendSigner.sign.mockClear();
+  stubRedstone();
+  stubIssuerHttp();
 });
+afterEach(() => vi.unstubAllGlobals());
 
 describe("runPriceUpdateCycle", () => {
-  it("records observations + a snapshot and pushes nav/feed for each asset", async () => {
+  it("records observations + a snapshot, and publishes an attested NAV and the feed", async () => {
     const db = makeDb();
-    const priceGuardClient = {
-      publishNav: vi.fn().mockResolvedValue("unsigned-nav-xdr"),
-      publishFeed: vi.fn().mockResolvedValue("unsigned-feed-xdr"),
-      guardedPrice: vi.fn().mockResolvedValue({
-        asset: "CASSETCONTRACT",
-        value: 10_000_000n,
-        status: "Ok",
-        ts: 1_700_000_000,
-        sources: [{ name: "issuer_nav", value: 10_000_000n, observedAt: 1_700_000_000, stale: false }],
-      }),
-    };
-    const signer = makeSigner();
-    const submit = vi.fn().mockResolvedValue({ hash: "hash1", status: "SUCCESS" });
+    const client = makeClient();
+    const submit = vi.fn().mockResolvedValue({ hash: "h", status: "SUCCESS" });
 
-    await runPriceUpdateCycle(db as any, priceGuardClient as any, signer as any, [makeAsset()], submit, makeTestEnv());
+    await runPriceUpdateCycle(db as any, client as any, sendSigner as any, [makeAsset()], submit, TEST_ENV);
 
     // 2 price_observation rows + 1 price_snapshot row
     expect(db.insert).toHaveBeenCalledTimes(3);
-    expect(db.values).toHaveBeenNthCalledWith(
-      3,
-      expect.objectContaining({ assetId: "asset-1", status: "Ok" }),
-    );
+    expect(db.values).toHaveBeenNthCalledWith(1, expect.objectContaining({ source: "issuer_nav", value: "0.0657660" }));
+    expect(db.values).toHaveBeenNthCalledWith(2, expect.objectContaining({ source: "redstone", value: "0.0657500" }));
+    expect(db.values).toHaveBeenNthCalledWith(3, expect.objectContaining({ assetId: "asset-1", status: "Ok" }));
 
-    expect(priceGuardClient.publishNav).toHaveBeenCalledWith(
-      "GPUBLISHER",
-      "CASSETCONTRACT",
-      "SPIKO",
-      expect.any(BigInt),
-      expect.any(Number),
-      expect.any(Buffer),
-    );
-    expect(priceGuardClient.publishFeed).toHaveBeenCalledWith(
-      "GPUBLISHER",
+    // The NAV signature is made by the publisher key and verifies over the canonical message.
+    const [, , code, value, ts, sig] = client.publishNav.mock.calls[0];
+    expect(code).toBe("CETES");
+    expect(value).toBe(657_660n);
+    expect(ts).toBe(1_791_447_179);
+    expect(verifyNavSignature(code, ts, value, sig, attestorPublicKeyBase64(sendSigner as any))).toBe(true);
+
+    expect(client.publishFeed).toHaveBeenCalledWith(
+      keypair.publicKey(),
       "CASSETCONTRACT",
       "redstone",
-      expect.any(BigInt),
-      expect.any(Number),
+      657_500n,
+      1_791_445_540,
     );
-    expect(priceGuardClient.guardedPrice).toHaveBeenCalledWith("CASSETCONTRACT");
-
-    // Each publish (nav + feed) is signed and submitted once.
-    expect(signer.sign).toHaveBeenCalledTimes(2);
     expect(submit).toHaveBeenCalledTimes(2);
-
     expect(fireSpy).not.toHaveBeenCalled();
   });
 
-  it("fires a price_degraded alert when the contract reports Degraded", async () => {
+  it("still publishes the feed and alerts when the issuer NAV request fails", async () => {
+    stubIssuerHttp({ "https://api.etherfuse.com/lookup/tokens/cost/CETES": jsonResponse({}, 503) });
     const db = makeDb();
-    const priceGuardClient = {
-      publishNav: vi.fn().mockResolvedValue("x"),
-      publishFeed: vi.fn().mockResolvedValue("y"),
-      guardedPrice: vi.fn().mockResolvedValue({
-        asset: "CASSETCONTRACT",
-        value: 0n,
-        status: "Degraded",
-        ts: 1_700_000_000,
-        sources: [],
-      }),
-    };
-    const signer = makeSigner();
-    const submit = vi.fn().mockResolvedValue({ hash: "hash2", status: "SUCCESS" });
+    const client = makeClient({ status: "Degraded" });
+    const submit = vi.fn().mockResolvedValue({ hash: "h", status: "SUCCESS" });
 
-    await runPriceUpdateCycle(db as any, priceGuardClient as any, signer as any, [makeAsset()], submit, makeTestEnv());
+    await runPriceUpdateCycle(db as any, client as any, sendSigner as any, [makeAsset()], submit, TEST_ENV);
 
-    expect(fireSpy).toHaveBeenCalledWith(
-      "price_degraded",
-      expect.objectContaining({ assetId: "asset-1", status: "Degraded" }),
-    );
+    expect(client.publishNav).not.toHaveBeenCalled();
+    expect(client.publishFeed).toHaveBeenCalledTimes(1);
+    expect(fireSpy).toHaveBeenCalledWith("price_degraded", expect.objectContaining({ reason: expect.stringContaining("issuer NAV fetch failed") }));
+    expect(fireSpy).toHaveBeenCalledWith("price_degraded", expect.objectContaining({ status: "Degraded" }));
   });
 
-  it("fires a price_halted alert when the contract reports Halted", async () => {
+  it("publishes only the feed for an issuer with no NAV API (franklin)", async () => {
     const db = makeDb();
-    const priceGuardClient = {
-      publishNav: vi.fn().mockResolvedValue("x"),
-      publishFeed: vi.fn().mockResolvedValue("y"),
-      guardedPrice: vi.fn().mockResolvedValue({
-        asset: "CASSETCONTRACT",
-        value: 11_000_000n,
-        status: "Halted",
-        ts: 1_700_000_000,
-        sources: [],
-      }),
-    };
-    const signer = makeSigner();
-    const submit = vi.fn().mockResolvedValue({ hash: "hash3", status: "SUCCESS" });
+    const client = makeClient({ status: "Degraded" });
+    const submit = vi.fn().mockResolvedValue({ hash: "h", status: "SUCCESS" });
+    const benji = makeAsset({ id: "asset-benji", code: "CETES", issuerCode: "franklin" });
 
-    await runPriceUpdateCycle(db as any, priceGuardClient as any, signer as any, [makeAsset()], submit, makeTestEnv());
+    await runPriceUpdateCycle(db as any, client as any, sendSigner as any, [benji], submit, TEST_ENV);
 
-    expect(fireSpy).toHaveBeenCalledWith(
-      "price_halted",
-      expect.objectContaining({ assetId: "asset-1", status: "Halted" }),
-    );
+    expect(client.publishNav).not.toHaveBeenCalled();
+    expect(client.publishFeed).toHaveBeenCalledTimes(1);
   });
 
-  it("skips an asset with an unknown issuer code instead of crashing the whole cycle", async () => {
+  it("fires price_halted when the contract reports Halted", async () => {
     const db = makeDb();
-    const priceGuardClient = {
-      publishNav: vi.fn().mockResolvedValue("x"),
-      publishFeed: vi.fn().mockResolvedValue("y"),
-      guardedPrice: vi.fn().mockResolvedValue({
-        asset: "CASSETCONTRACT",
-        value: 10_000_000n,
-        status: "Ok",
-        ts: 1_700_000_000,
-        sources: [],
-      }),
-    };
-    const signer = makeSigner();
-    const submit = vi.fn().mockResolvedValue({ hash: "hash4", status: "SUCCESS" });
+    const client = makeClient({ status: "Halted" });
+    const submit = vi.fn().mockResolvedValue({ hash: "h", status: "SUCCESS" });
 
-    const badAsset = makeAsset({ id: "asset-bad", code: "UNKNOWN", issuerCode: "not-a-real-issuer" });
-    const goodAsset = makeAsset({ id: "asset-good", code: "SPIKO", issuerCode: "spiko" });
+    await runPriceUpdateCycle(db as any, client as any, sendSigner as any, [makeAsset()], submit, TEST_ENV);
 
-    await runPriceUpdateCycle(
-      db as any,
-      priceGuardClient as any,
-      signer as any,
-      [badAsset, goodAsset],
-      submit,
-      makeTestEnv(),
-    );
-
-    // Only the good asset's cycle actually published anything.
-    expect(priceGuardClient.publishNav).toHaveBeenCalledTimes(1);
-    expect(priceGuardClient.publishNav).toHaveBeenCalledWith(
-      "GPUBLISHER",
-      "CASSETCONTRACT",
-      "SPIKO",
-      expect.any(BigInt),
-      expect.any(Number),
-      expect.any(Buffer),
-    );
+    expect(fireSpy).toHaveBeenCalledWith("price_halted", expect.objectContaining({ assetId: "asset-1", status: "Halted" }));
   });
 
-  it("skips publishing when the issuer NAV signature does not verify against ISSUER_NAV_PUBLIC_KEYS", async () => {
+  it("skips an asset with an unknown issuer code without failing the others", async () => {
     const db = makeDb();
-    const priceGuardClient = {
-      publishNav: vi.fn().mockResolvedValue("x"),
-      publishFeed: vi.fn().mockResolvedValue("y"),
-      guardedPrice: vi.fn().mockResolvedValue({
-        asset: "CASSETCONTRACT",
-        value: 10_000_000n,
-        status: "Ok",
-        ts: 1_700_000_000,
-        sources: [],
-      }),
-    };
-    const signer = makeSigner();
-    const submit = vi.fn().mockResolvedValue({ hash: "hash5", status: "SUCCESS" });
+    const client = makeClient();
+    const submit = vi.fn().mockResolvedValue({ hash: "h", status: "SUCCESS" });
+    const bad = makeAsset({ id: "asset-bad", issuerCode: "not-a-real-issuer" });
 
-    // A syntactically valid but WRONG public key (a different Ed25519 key than the mock adapters
-    // actually sign with) — verification must fail, not silently pass.
-    const wrongPublicKeyBase64 = Buffer.alloc(32, 7).toString("base64");
-    const env = makeTestEnv({
-      ISSUER_NAV_PUBLIC_KEYS: JSON.stringify({ spiko: wrongPublicKeyBase64 }),
+    await runPriceUpdateCycle(db as any, client as any, sendSigner as any, [bad, makeAsset()], submit, TEST_ENV);
+
+    expect(client.publishNav).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails the whole cycle loudly when no RedStone feed is configured", async () => {
+    const env = { ...TEST_ENV, REDSTONE_FEED_CONTRACT_IDS: "" } as NodeJS.ProcessEnv;
+    await expect(
+      runPriceUpdateCycle(makeDb() as any, makeClient() as any, sendSigner as any, [makeAsset()], vi.fn(), env),
+    ).rejects.toThrow(/REDSTONE_FEED_CONTRACT_IDS is not configured/);
+  });
+
+  describe("shadow run (PRICE_GUARD_PUBLISH=false)", () => {
+    const shadowEnv = { ...TEST_ENV, PRICE_GUARD_PUBLISH: "false" } as NodeJS.ProcessEnv;
+
+    it("records real readings but sends nothing on-chain and writes no snapshot", async () => {
+      const db = makeDb();
+      const client = makeClient();
+      const submit = vi.fn();
+
+      await runPriceUpdateCycle(db as any, client as any, sendSigner as any, [makeAsset()], submit, shadowEnv);
+
+      expect(db.insert).toHaveBeenCalledTimes(2);
+      expect(client.publishNav).not.toHaveBeenCalled();
+      expect(client.publishFeed).not.toHaveBeenCalled();
+      expect(client.guardedPrice).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
+      // 0.065766 vs 0.06575 is ~2 bps, inside the 50 bps band.
+      expect(fireSpy).not.toHaveBeenCalled();
     });
 
-    await runPriceUpdateCycle(db as any, priceGuardClient as any, signer as any, [makeAsset()], submit, env);
-
-    expect(priceGuardClient.publishNav).not.toHaveBeenCalled();
-    expect(priceGuardClient.publishFeed).not.toHaveBeenCalled();
-    expect(fireSpy).toHaveBeenCalledWith(
-      "price_degraded",
-      expect.objectContaining({ assetId: "asset-1", reason: "issuer NAV signature verification failed" }),
-    );
-  });
-
-  it("skips publishing when no ISSUER_NAV_PUBLIC_KEYS entry exists for the asset's issuer code", async () => {
-    const db = makeDb();
-    const priceGuardClient = {
-      publishNav: vi.fn().mockResolvedValue("x"),
-      publishFeed: vi.fn().mockResolvedValue("y"),
-      guardedPrice: vi.fn(),
-    };
-    const signer = makeSigner();
-    const submit = vi.fn().mockResolvedValue({ hash: "hash6", status: "SUCCESS" });
-
-    await runPriceUpdateCycle(
-      db as any,
-      priceGuardClient as any,
-      signer as any,
-      [makeAsset()],
-      submit,
-      { ISSUER_NAV_PUBLIC_KEYS: JSON.stringify({}) } as NodeJS.ProcessEnv,
-    );
-
-    expect(priceGuardClient.publishNav).not.toHaveBeenCalled();
-    expect(priceGuardClient.guardedPrice).not.toHaveBeenCalled();
-  });
-
-  it("throws for an unknown PRICE_GUARD_MODE rather than silently defaulting", async () => {
-    const db = makeDb();
-    const priceGuardClient = {
-      publishNav: vi.fn(),
-      publishFeed: vi.fn(),
-      guardedPrice: vi.fn(),
-    };
-    const signer = makeSigner();
-    const submit = vi.fn();
-
-    // getIndependentFeedAdapter is resolved once up front, before the per-asset try/catch, so an
-    // invalid mode fails the whole cycle loudly rather than being swallowed per-asset.
-    await expect(
-      runPriceUpdateCycle(
+    it("alerts when the issuer NAV and the feed disagree by more than the asset's band", async () => {
+      const db = makeDb();
+      await runPriceUpdateCycle(
         db as any,
-        priceGuardClient as any,
-        signer as any,
-        [makeAsset()],
-        submit,
-        { PRICE_GUARD_MODE: "bogus" } as NodeJS.ProcessEnv,
-      ),
-    ).rejects.toThrow(/PRICE_GUARD_MODE="bogus"/);
+        makeClient() as any,
+        sendSigner as any,
+        [makeAsset({ priceBandBps: 1 })],
+        vi.fn(),
+        shadowEnv,
+      );
+
+      expect(fireSpy).toHaveBeenCalledWith(
+        "price_degraded",
+        expect.objectContaining({ reason: expect.stringContaining("disagree by 2 bps") }),
+      );
+    });
   });
 });

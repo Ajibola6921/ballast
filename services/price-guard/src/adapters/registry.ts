@@ -1,87 +1,58 @@
 /**
- * Resolves this service's two adapter kinds (`IndependentFeedAdapter`, `IssuerNavAdapter`)
- * according to `PRICE_GUARD_MODE` (`.env.example`), mirroring
- * `services/issuer-gateway/src/registry.ts`'s "mode env var + registry + real adapter" pattern:
- * `"mock"` (the default) returns in-memory fakes for local dev/test; `"live"` constructs real
- * adapters. Any other mode, or an unknown issuer code, throws rather than silently defaulting —
- * this replaces `mockIssuers.ts`'s old `issuerAdapterForAsset()`, which silently substring-matched
- * asset codes and fell back to "spiko" on no match.
+ * Resolves this service's two adapter kinds (`IndependentFeedAdapter`, `IssuerNavAdapter`). There
+ * is no mock mode: every adapter reads a real source. An unknown issuer code throws; an issuer
+ * with no NAV API (Franklin) returns `undefined`, so its assets are priced from the independent
+ * feed alone and the on-chain guard reports them `Degraded` rather than being fed a made-up NAV.
  */
 import type { IndependentFeedAdapter, IssuerNavAdapter } from "./types.js";
-import { MockRedstoneAdapter } from "./mockRedstone.js";
-import { MockEtherfuseAdapter, MockFranklinAdapter, MockSpikoAdapter } from "./mockIssuers.js";
 import { RedstoneAdapter, loadRedstoneFeedContractIds } from "./redstoneAdapter.js";
 import { SpikoNavAdapter } from "./spikoNavAdapter.js";
 import { EtherfuseNavAdapter } from "./etherfuseNavAdapter.js";
-import { FranklinNavAdapter } from "./franklinNavAdapter.js";
-
-/** Issuer code -> mock adapter instance. */
-const mockIssuerAdapters: Record<string, IssuerNavAdapter> = {
-  spiko: new MockSpikoAdapter(),
-  etherfuse: new MockEtherfuseAdapter(),
-  franklin: new MockFranklinAdapter(),
-};
-
-const mockFeedAdapter: IndependentFeedAdapter = new MockRedstoneAdapter();
 
 /**
- * Builds the `"live"`-mode issuer NAV adapters from env (see `.env.example`'s "issuer-gateway
- * live adapters" section — these reuse the same `SPIKO_API_BASE_URL`/etc. vars). Lazy (called
- * only when `PRICE_GUARD_MODE === "live"`) so `"mock"` mode never requires these vars to be set.
+ * `ISSUER_NAV_SYMBOLS` — JSON map `assetCode -> issuer symbol`, for assets whose on-chain code is
+ * not the symbol the issuer's API uses. A testnet token `RWA1` priced like Etherfuse's real USTRY
+ * bond is `{"RWA1":"USTRY"}`. Unmapped assets use their own code.
  */
-function buildLiveIssuerAdapters(env: NodeJS.ProcessEnv): Record<string, IssuerNavAdapter> {
-  return {
-    spiko: new SpikoNavAdapter(env.SPIKO_API_BASE_URL ?? "", env.SPIKO_API_KEY ?? ""),
-    etherfuse: new EtherfuseNavAdapter(env.ETHERFUSE_API_BASE_URL ?? "", env.ETHERFUSE_API_KEY ?? ""),
-    franklin: new FranklinNavAdapter(env.FRANKLIN_API_BASE_URL ?? "", env.FRANKLIN_API_KEY ?? ""),
-  };
+export function loadIssuerNavSymbols(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  if (!env.ISSUER_NAV_SYMBOLS) return {};
+  try {
+    return JSON.parse(env.ISSUER_NAV_SYMBOLS);
+  } catch {
+    throw new Error("price-guard: ISSUER_NAV_SYMBOLS is not valid JSON");
+  }
 }
 
-/**
- * Resolves the `IssuerNavAdapter` for `issuerCode` (the `asset.issuer_code` DB column — an exact
- * match, never a substring guess). Throws on an unknown mode or an unknown issuer code rather than
- * silently defaulting.
- */
+function withSymbols(adapter: IssuerNavAdapter, symbols: Record<string, string>): IssuerNavAdapter {
+  return { fetchNav: (assetCode) => adapter.fetchNav(symbols[assetCode] ?? assetCode) };
+}
+
+/** Issuer codes with no machine-readable NAV source we can call. */
+const NO_NAV_API = new Set(["franklin"]);
+
 export function getIssuerNavAdapter(
   issuerCode: string,
   env: NodeJS.ProcessEnv = process.env,
-): IssuerNavAdapter {
-  const mode = env.PRICE_GUARD_MODE ?? "mock";
-
-  let adapters: Record<string, IssuerNavAdapter>;
-  if (mode === "mock") {
-    adapters = mockIssuerAdapters;
-  } else if (mode === "live") {
-    adapters = buildLiveIssuerAdapters(env);
-  } else {
-    throw new Error(
-      `price-guard: PRICE_GUARD_MODE="${mode}" is not implemented — only "mock" and "live" are supported`,
-    );
+): IssuerNavAdapter | undefined {
+  const code = issuerCode.toLowerCase();
+  if (NO_NAV_API.has(code)) {
+    return undefined;
   }
-
-  const adapter = adapters[issuerCode.toLowerCase()];
-  if (!adapter) {
-    throw new Error(
-      `price-guard: no ${mode} issuer NAV adapter registered for issuer code "${issuerCode}" (known: ${Object.keys(adapters).join(", ")})`,
-    );
+  const symbols = loadIssuerNavSymbols(env);
+  switch (code) {
+    case "spiko":
+      return withSymbols(new SpikoNavAdapter(env.SPIKO_NAV_API_BASE_URL || undefined), symbols);
+    case "etherfuse":
+      return withSymbols(new EtherfuseNavAdapter(env.ETHERFUSE_NAV_API_BASE_URL || undefined), symbols);
+    default:
+      throw new Error(`price-guard: no issuer NAV adapter for issuer code "${issuerCode}"`);
   }
-  return adapter;
 }
 
-/**
- * Resolves the single `IndependentFeedAdapter` (RedStone's SEP-40 feed) for this cycle. Throws on
- * an unknown mode.
- */
 export function getIndependentFeedAdapter(env: NodeJS.ProcessEnv = process.env): IndependentFeedAdapter {
-  const mode = env.PRICE_GUARD_MODE ?? "mock";
-
-  if (mode === "mock") {
-    return mockFeedAdapter;
+  const feeds = loadRedstoneFeedContractIds(env);
+  if (Object.keys(feeds).length === 0) {
+    throw new Error("price-guard: REDSTONE_FEED_CONTRACT_IDS is not configured");
   }
-  if (mode === "live") {
-    return new RedstoneAdapter(loadRedstoneFeedContractIds(env), env);
-  }
-  throw new Error(
-    `price-guard: PRICE_GUARD_MODE="${mode}" is not implemented — only "mock" and "live" are supported`,
-  );
+  return new RedstoneAdapter(feeds, env);
 }

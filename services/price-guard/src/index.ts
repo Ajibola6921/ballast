@@ -13,12 +13,15 @@ const logger = createLogger("price-guard");
 const db = createDatabase();
 const network = loadNetworkConfig();
 
-const priceGuardClient = new PriceGuardClient({
-  network,
-  contractId: requireContractId(network, "priceGuard"),
-});
+// PRICE_GUARD_PUBLISH=false: shadow run - record real readings and flag disagreement, but send
+// nothing on-chain, so no PriceGuard contract or publisher key is needed.
+const shadow = process.env.PRICE_GUARD_PUBLISH === "false";
 
-const signer = await createOperatorSigner("price-publisher", network.networkPassphrase);
+const priceGuardClient = shadow
+  ? null
+  : new PriceGuardClient({ network, contractId: requireContractId(network, "priceGuard") });
+
+const signer = shadow ? null : await createOperatorSigner("price-publisher", network.networkPassphrase);
 
 // PRD §5 Phase 1: "every 60s is a reasonable default", configurable via env.
 const CRON_EXPR = process.env.PRICE_GUARD_CRON ?? "*/1 * * * *";
@@ -56,4 +59,4 @@ cron.schedule(CRON_EXPR, async () => {
   }
 });
 
-logger.info({ cron: CRON_EXPR }, "price-guard service started");
+logger.info({ cron: CRON_EXPR, shadow }, "price-guard service started");

@@ -1,8 +1,7 @@
 /**
- * Off-chain verification of issuer-signed NAV readings (PRD §6.4/§6.5's "issuer-signed NAV").
- * Each `IssuerNavAdapter.fetchNav` call (see `./adapters/types.ts`) returns a detached Ed25519
- * signature over the canonical message `` `${assetCode}:${ts}:${value}` `` (UTF-8 bytes) —
- * `pipeline.ts` verifies it here before publishing the NAV on-chain.
+ * Canonical NAV message and its Ed25519 verification. Issuers do not sign NAV, so the
+ * price-publisher key attests each reading over `` `${assetCode}:${ts}:${value}` `` (UTF-8 bytes)
+ * — see `navAttestor.ts` — and `pipeline.ts` checks the signature here before publishing.
  *
  * This is the SAME canonical message the on-chain `PriceGuard.publish_nav` verifies via
  * `env.crypto().ed25519_verify(...)` once `require_nav_signature` is enabled (see
@@ -49,21 +48,4 @@ export function verifyNavSignature(
   const message = canonicalNavMessage(assetCode, ts, value);
   const publicKey = publicKeyFromRawBase64(issuerPublicKeyRawBase64);
   return cryptoVerify(null, message, publicKey, sig);
-}
-
-/**
- * Parses `ISSUER_NAV_PUBLIC_KEYS` — a JSON map `issuerCode -> base64 raw Ed25519 public key (32
- * bytes)`, e.g. `{"spiko":"<base64>","etherfuse":"<base64>","franklin":"<base64>"}`. Mirrors the
- * JSON-map-env-var parsing style `INSTITUTION_API_KEYS` uses in `services/api/src/config.ts`
- * (try/catch JSON.parse, throw a clear error rather than silently ignoring malformed input).
- */
-export function loadIssuerNavPublicKeys(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  if (!env.ISSUER_NAV_PUBLIC_KEYS) {
-    return {};
-  }
-  try {
-    return JSON.parse(env.ISSUER_NAV_PUBLIC_KEYS);
-  } catch {
-    throw new Error("price-guard: ISSUER_NAV_PUBLIC_KEYS is not valid JSON");
-  }
 }
