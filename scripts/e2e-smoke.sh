@@ -45,7 +45,6 @@ retry() {
 inv() { retry stellar contract invoke --network "$NETWORK" "$@"; }
 
 ZERO_HASH="0000000000000000000000000000000000000000000000000000000000000000"
-ZERO_SIG="00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
 log "Opening a credit line: lender=$LENDER borrower=$BORROWER limit=10,000 TUSD @ 7% APR"
 LINE_ID=$(inv --id "$CREDIT_LINE_CID" --source lender -- open \
@@ -63,17 +62,26 @@ inv --id "$PLEDGE_VAULT_CID" --source borrower -- pledge \
 log "Keeper syncs the pledged units into CreditLine's LTV view (services/keeper's syncCollateral job, run by hand here)"
 inv --id "$CREDIT_LINE_CID" --source keeper -- sync_collateral --caller "$KEEPER" --line "$LINE_ID" --units 50000000000 >/dev/null
 
-NOW=$(date +%s)
-log "Price publisher pushes issuer NAV + an independent feed reading (both \$1.00) so PriceGuard reaches Ok"
-# asset_code is the hex-encoded UTF-8 bytes of "RWA1" (the ticker this deploy registers) - required
-# since publish_nav's on-chain issuer-signature check (deploy.sh disables it above for this smoke
-# deploy) verifies over a message built from this exact asset_code/ts/value.
+log "Price publisher pushes the real issuer NAV and the real oracle reading for RWA1 (priced as Etherfuse USTRY)"
+# shellcheck source=/dev/null
+source scripts/real-sources.env
+export REDSTONE_RPC_URL REDSTONE_NETWORK_PASSPHRASE REDSTONE_FEED_CONTRACT_IDS ISSUER_NAV_SYMBOLS
+READINGS=$(STELLAR_SIMULATION_SOURCE="$ADMIN" retry pnpm --silent --filter @ballast/service-price-guard exec \
+  tsx src/smoke.ts --json RWA1:etherfuse)
+read -r NAV_VALUE NAV_TS FEED_VALUE FEED_TS < <(echo "$READINGS" | node -e '
+  const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  console.log(r.nav.value, r.nav.ts, r.feed.value, r.feed.ts);')
+log "  NAV $NAV_VALUE @ $NAV_TS, oracle $FEED_VALUE @ $FEED_TS (1e7 fixed point)"
+
+# asset_code is the hex-encoded UTF-8 bytes of "RWA1" (the ticker this deploy registers).
+# publish_nav verifies the publisher's Ed25519 signature over "RWA1:<ts>:<value>" on-chain.
 RWA1_ASSET_CODE_HEX="52574131"
+NAV_SIG=$(node scripts/sign-nav.mjs "$(stellar keys secret price_publisher)" RWA1 "$NAV_TS" "$NAV_VALUE")
 inv --id "$PRICE_GUARD_CID" --source price_publisher -- publish_nav \
   --publisher "$PRICE_PUBLISHER" --asset "$RWA_SAC" --asset_code "$RWA1_ASSET_CODE_HEX" \
-  --value 10000000 --ts "$NOW" --sig "$ZERO_SIG" >/dev/null
+  --value "$NAV_VALUE" --ts "$NAV_TS" --sig "$NAV_SIG" >/dev/null
 inv --id "$PRICE_GUARD_CID" --source price_publisher -- publish_source \
-  --publisher "$PRICE_PUBLISHER" --asset "$RWA_SAC" --source redston --value 10000000 --ts "$NOW" >/dev/null
+  --publisher "$PRICE_PUBLISHER" --asset "$RWA_SAC" --source redston --value "$FEED_VALUE" --ts "$FEED_TS" >/dev/null
 
 log "guarded_price:"
 inv --id "$PRICE_GUARD_CID" --source admin -- guarded_price --asset "$RWA_SAC"

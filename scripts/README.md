@@ -108,12 +108,39 @@ Not covered:
 
 - **The console in a browser.** It builds and type-checks, and uses the same API calls the e2e
   scripts do, but signing goes through the Freighter extension, which the scripts can't drive.
-- **Real prices and issuers.** `PRICE_GUARD_MODE=mock` and `ISSUER_GATEWAY_MODE=mock` are what
-  `dev-setup.sh` writes; the test RWA has no real issuer, and on-chain NAV signature checking is
-  disabled for this deploy (see `TESTNET_DEPLOYMENT.md`).
+- **Real RWAs and real USDC.** RWA1 and TUSD are tokens this repo issues itself. Prices for RWA1
+  are real: it is priced as Etherfuse's USTRY bond (Etherfuse's price API plus RedStone's USTRY
+  feed read from mainnet, see `scripts/real-sources.env`). But no issuer has authorised Ballast to
+  hold the real bonds, so nothing here custodies a real RWA.
+- **A price move.** Real prices do not fall on demand, so the liquidation drill tightens the
+  line's margin thresholds under its real LTV instead of dropping the price.
 - **Lien custody modes, repo margin calls and default-close, the payout hop, webhooks.** The code
   is there and unit-tested; none of it is exercised against a live network.
 - **A margin call that is cured.** The liquidation drill goes straight through to liquidation.
+- **Issuer back-office calls.** `services/issuer-gateway` is not called by anything yet, and its
+  lien/redemption endpoints are not verified against any real issuer API.
+
+## Price sources
+
+NAV is not signed by issuers, so `services/price-guard` signs each NAV it fetched with the
+price-publisher key and `PriceGuard.publish_nav` verifies that signature on-chain. The guarantee
+is "Ballast's publisher saw this value from the issuer's API", not issuer attestation.
+`scripts/configure-nav-key.sh [network]` registers the publisher key and turns the requirement on;
+`deploy.sh` runs it, and it is the way to bring an older deployment in line.
+
+To see the real sources without any contract or database (safe against mainnet):
+
+```
+STELLAR_RPC_URL=https://mainnet.sorobanrpc.com STELLAR_HORIZON_URL=https://horizon.stellar.org \
+STELLAR_NETWORK_PASSPHRASE="Public Global Stellar Network ; September 2015" \
+STELLAR_SIMULATION_SOURCE=<any valid G address> \
+REDSTONE_FEED_CONTRACT_IDS='{"CETES":"CCYGBQZ5JKE2TGK2XNNVIZRKFEIT27NZADS3XJFSO4CCIH3LHIUP34LG"}' \
+pnpm --filter @ballast/service-price-guard smoke CETES:etherfuse USTBL:spiko
+```
+
+For a long-running shadow run set `PRICE_GUARD_PUBLISH=false` on `services/price-guard`: it records
+the real readings and alerts when issuer NAV and oracle disagree by more than the asset's band,
+and sends nothing on-chain.
 
 ## If a CLI flag doesn't match
 

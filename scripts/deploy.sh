@@ -128,15 +128,9 @@ retry stellar contract invoke --id "${CID[registry]}" --source admin --network "
   --config "{\"issuer\":\"$RWA_ISSUER\",\"contract\":\"$RWA_SAC\",\"standard\":\"ClassicSac\",\"yield_type\":\"Accumulating\",\"custody_mode\":\"Escrow\",\"ccy\":\"USD\",\"redemption_lag_days\":1,\"haircut_base_bps\":500,\"haircut_fx_bps\":0,\"price_band_bps\":50,\"daily_move_band_bps\":100,\"status\":\"active\"}" \
   >/dev/null
 
-log "Configuring PriceGuard for RWA1 (50bps band, 100bps daily move, 1h staleness)"
+log "Configuring PriceGuard for RWA1 (50bps band, 100bps daily move, 6h staleness - RedStone's USTRY feed updates every 1-2h)"
 retry stellar contract invoke --id "${CID[price-guard]}" --source admin --network "$NETWORK" -- configure_asset \
-  --admin "$ADMIN" --asset "$RWA_SAC" --band_bps 50 --daily_move_band_bps 100 --max_staleness_s 3600 >/dev/null
-
-log "Disabling PriceGuard's issuer-signature requirement for this deploy (bring-up affordance -" \
-    "no issuer key is registered for RWA1 here; see contracts/price-guard's module doc comment" \
-    "and configure_issuer_key/configure_signature_requirement for the real production path)"
-retry stellar contract invoke --id "${CID[price-guard]}" --source admin --network "$NETWORK" -- configure_signature_requirement \
-  --admin "$ADMIN" --required false >/dev/null
+  --admin "$ADMIN" --asset "$RWA_SAC" --band_bps 50 --daily_move_band_bps 100 --max_staleness_s 21600 >/dev/null
 
 log "Configuring PledgeVault for RWA1 (5% haircut, escrow mode)"
 retry stellar contract invoke --id "${CID[pledge-vault]}" --source admin --network "$NETWORK" -- configure_asset \
@@ -173,6 +167,10 @@ REPO_DVP_CID=${CID[repo-dvp]}
 EOF
 
 log "Wrote $OUT_FILE"
+
+# PriceGuard enforces NAV signatures by default; this registers the price publisher's key (the
+# attestor services/price-guard signs with) for RWA1. It reads the file written above.
+scripts/configure-nav-key.sh "$NETWORK"
 
 scripts/configure-desks.sh "$NETWORK"
 

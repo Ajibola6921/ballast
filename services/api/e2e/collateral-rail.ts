@@ -82,6 +82,7 @@ async function main() {
     (l) => l.priceStatus === "Ok" && BigInt(l.collateralValue ?? "0") > 140n * UNIT,
   );
   step(`  collateral value = ${line.collateralValue}, price = ${line.priceStatus}`);
+  const collateralBefore = BigInt(line.collateralValue ?? "0"); // 150 RWA1 at the live price
 
   step("Borrower draws 20 TUSD");
   await act(borrowerSession, borrower, "POST", `${linePath}/draws`, {
@@ -131,7 +132,8 @@ async function main() {
   line = await waitFor(
     "collateral to drop after the release",
     readLine,
-    (l) => BigInt(l.collateralValue ?? "0") < 100n * UNIT,
+    // 100 of the 150 RWA1 remain: about two thirds of the value, with room for the price to tick.
+    (l) => BigInt(l.collateralValue ?? "0") < (collateralBefore * 70n) / 100n,
   );
   step(`  collateral value = ${line.collateralValue}`);
 

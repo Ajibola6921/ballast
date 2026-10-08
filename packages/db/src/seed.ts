@@ -61,9 +61,10 @@ async function ensureAsset(db: Database): Promise<string> {
     .values({
       code: process.env.RWA_CODE ?? "RWA1",
       issuerG: requireEnv("RWA_ISSUER"),
-      // Which `IssuerNavAdapter` services/price-guard resolves for this asset. The test RWA has
-      // no real issuer, so it rides on a mock adapter (PRICE_GUARD_MODE=mock).
-      issuerCode: process.env.RWA_ISSUER_CODE ?? "spiko",
+      // Which `IssuerNavAdapter` services/price-guard resolves for this asset. The test RWA is
+      // priced as Etherfuse's real USTRY bond (ISSUER_NAV_SYMBOLS / REDSTONE_FEED_CONTRACT_IDS in
+      // scripts/real-sources.env map RWA1 onto it).
+      issuerCode: process.env.RWA_ISSUER_CODE ?? "etherfuse",
       contractC,
       standard: "classic_sac",
       yieldType: "accumulating",

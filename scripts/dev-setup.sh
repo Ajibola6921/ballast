@@ -98,10 +98,9 @@ PAYOUT_HOP_PORT=$(keep PAYOUT_HOP_PORT 3002)
 JWT_SIGNING_SECRET=$(keep JWT_SIGNING_SECRET "$(openssl rand -hex 32)")
 WEBHOOK_HMAC_SECRET=$(keep WEBHOOK_HMAC_SECRET "$(openssl rand -hex 32)")
 
-# The mock issuer NAV adapters sign with one fixed test key; its public half is what
-# services/price-guard verifies those readings against in PRICE_GUARD_MODE=mock.
-pnpm --filter @ballast/service-price-guard... build >/dev/null
-MOCK_NAV_KEY=$(node -e "import('./services/price-guard/dist/adapters/mockIssuers.js').then(m => console.log(m.MOCK_ISSUER_NAV_PUBLIC_KEY_BASE64))")
+# Real price sources for the test asset (see scripts/real-sources.env).
+# shellcheck source=/dev/null
+source scripts/real-sources.env
 
 log "Writing .env"
 umask 077
@@ -153,11 +152,12 @@ PAYOUT_HOP_SECRET_KEY=$(stellar keys secret payout_hop)
 KEEPER_CURE_EXPIRY_CRON="* * * * *"
 KEEPER_REPO_UNWIND_CRON="* * * * *"
 
-ISSUER_GATEWAY_MODE=mock
-PRICE_GUARD_MODE=mock
-# Optional price override for the mock adapters ({"RWA1":"0.62"}), used by e2e-liquidation.sh.
-MOCK_PRICE_FILE=$PWD/.mock-prices.json
-ISSUER_NAV_PUBLIC_KEYS={"spiko":"$MOCK_NAV_KEY","etherfuse":"$MOCK_NAV_KEY","franklin":"$MOCK_NAV_KEY"}
+# RWA1 is priced as Etherfuse's real USTRY bond: Etherfuse's price API for the issuer NAV and
+# RedStone's USTRY feed (read from mainnet) as the independent source.
+REDSTONE_RPC_URL=$REDSTONE_RPC_URL
+REDSTONE_NETWORK_PASSPHRASE="$REDSTONE_NETWORK_PASSPHRASE"
+REDSTONE_FEED_CONTRACT_IDS='$REDSTONE_FEED_CONTRACT_IDS'
+ISSUER_NAV_SYMBOLS='$ISSUER_NAV_SYMBOLS'
 EOF
 
 cat > apps/console/.env <<EOF

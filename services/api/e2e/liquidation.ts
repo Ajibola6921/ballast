@@ -1,14 +1,15 @@
 /**
  * Drives a credit line all the way through liquidation. The borrower draws against healthy
- * collateral, the (mock) price then falls far enough to put the line over the liquidation
- * threshold, and from there no customer does anything: `services/price-guard` publishes the new
- * price, `services/margin-monitor` records the state change, and `services/keeper` arms the
- * breach, waits out the cure window, liquidates the line and sends the collateral to the lender.
+ * collateral, then the risk admin tightens the line's margin thresholds until the real LTV is over
+ * the liquidation level. Real market prices do not fall 38% on demand, so the breach is created by
+ * moving the threshold, not the price, which stays whatever the live sources report. From there no
+ * customer does anything: `services/margin-monitor` records the state change, and
+ * `services/keeper` arms the breach, waits out the cure window, liquidates the line and sends the
+ * collateral to the lender.
  *
- * Run via `scripts/e2e-liquidation.sh`, which widens the price guard's daily-move band first (a
- * 38% one-step drop would otherwise halt the price rather than move it) and puts it back after.
+ * Run via `scripts/e2e-liquidation.sh`, which puts the original thresholds back on exit.
  */
-import { writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import {
   RWA_SAC,
   UNIT,
@@ -28,8 +29,22 @@ import {
   type LineDetail,
 } from "./lib.js";
 
-const MOCK_PRICE_FILE = required("MOCK_PRICE_FILE");
 const CURE_WINDOW_S = 60;
+
+/** Overwrites CreditLine's margin thresholds for the test asset (admin-only on-chain). */
+function setThresholds(warningBps: number, marginCallBps: number, liquidationBps: number): void {
+  execFileSync(
+    "stellar",
+    [
+      "contract", "invoke", "--id", required("CREDIT_LINE_CID"), "--source", "admin",
+      "--network", required("NETWORK"), "--", "configure_asset",
+      "--admin", required("ADMIN"), "--asset", RWA_SAC, "--price_guard", required("PRICE_GUARD_CID"),
+      "--usdc", required("USDC_SAC"), "--haircut_bps", "500",
+      "--thresholds", JSON.stringify({ warning_bps: warningBps, margin_call_bps: marginCallBps, liquidation_bps: liquidationBps }),
+    ],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+}
 
 async function main() {
   const lenderSession = await login(lender);
@@ -58,7 +73,7 @@ async function main() {
     custodyMode: "escrow",
   });
 
-  step("Waiting for synced collateral and an Ok price, then drawing 60 TUSD (~63% LTV)");
+  step("Waiting for synced collateral and an Ok price, then drawing 60 TUSD (~59% LTV at USTRY's ~$1.08)");
   await waitFor(
     "synced collateral and an Ok price",
     readLine,
@@ -71,8 +86,10 @@ async function main() {
   let line = await readLine();
   assert(line.marginState === "Healthy", `line is Healthy after the draw (got ${line.marginState})`);
 
-  step("Price falls to $0.62: 100 RWA1 is now worth ~58.9 after the haircut, against 60 of debt");
-  writeFileSync(MOCK_PRICE_FILE, JSON.stringify({ [asset.code]: "0.62" }));
+  const ltv = line.ltvBps ?? 0;
+  step(`Risk tightens the line's thresholds below its real LTV of ${ltv} bps (the price itself is unchanged)`);
+  assert(ltv > 1500, `the line has a meaningful LTV to breach (got ${ltv} bps)`);
+  setThresholds(ltv - 1200, ltv - 700, ltv - 200);
 
   line = await waitFor(
     "the contract to see a liquidation-level LTV",

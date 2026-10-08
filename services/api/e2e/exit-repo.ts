@@ -6,7 +6,7 @@
  *    touches it again — `services/keeper` unwinds leg 2 at maturity on the allowance the borrower
  *    granted at settlement.
  */
-import { act, assert, borrower, call, lender, login, run, seededAsset, step, units, waitFor, type Built } from "./lib.js";
+import { UNIT, act, assert, borrower, call, lender, login, run, seededAsset, step, units, waitFor, type Built } from "./lib.js";
 
 interface Positions {
   exitQuotes: Array<{ id: string; status: string; usdcOut: string }>;
@@ -32,8 +32,12 @@ async function main() {
     { assetId: asset.id, units: units(10) },
   );
   const usdcOut = BigInt(quote.usdcOut);
-  // ~$1 less a 25bps spread on 10 units: a little under 10 USDC, never more.
-  assert(usdcOut > BigInt(units(9)) && usdcOut < BigInt(units(10)), `quote is just under 10 USDC (got ${usdcOut})`);
+  // 10 units at the live guarded price, less the desk's spread: a little under 10 x price, never more.
+  const worth = BigInt(Math.round(Number(asset.price?.value) * 10 * Number(UNIT)));
+  assert(
+    usdcOut > (worth * 98n) / 100n && usdcOut < worth,
+    `quote is just under 10 x the live price (price ${asset.price?.value}, got ${usdcOut} stroops)`,
+  );
   step(`  quote: ${usdcOut} stroops USDC at ${quote.spreadBps} bps spread`);
 
   step("Holder executes the quote");
