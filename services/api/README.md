@@ -61,7 +61,7 @@ function signed(method: string, path: string, body: string, keyId: string, secre
 ## Webhooks
 
 `POST /v1/webhooks/subscriptions { "url": "https://…", "events": ["margin.call_issued"] }` returns a
-signing secret once. `GET /v1/webhooks/events` lists the events that can be subscribed to. Each
+signing secret once. `GET /v1/webhooks/events` lists the events that can be subscribed to (price status changes; margin state changes, calls and cures; liquidation started and completed; exit filled; repo leg 1 settled). A subscriber is sent what happens after it subscribes, not earlier history. Each
 delivery is a POST with:
 
 - `x-ballast-event`, `x-ballast-delivery`

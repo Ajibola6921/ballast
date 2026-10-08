@@ -121,7 +121,7 @@ describe("eventsForMarginTransition", () => {
 describe("fanOutRecentEvents", () => {
   const now = new Date("2026-10-08T12:00:00Z");
   const sub = (id: string, partyId: string, events: string[], active = true) => ({
-    id, partyId, url: "https://hooks.example.com/x", events, secretCiphertext: "x", active, createdAt: now,
+    id, partyId, url: "https://hooks.example.com/x", events, secretCiphertext: "x", active, createdAt: new Date("2026-10-01T00:00:00Z"),
   });
 
   it("sends a margin event only to the line's lender and borrower, filtered by event", async () => {
@@ -344,5 +344,71 @@ describe("webhook routes", () => {
     ]);
     const redeliver = await app.inject({ method: "POST", url: "/v1/webhooks/deliveries/d-x/redeliver", headers: authed });
     expect(redeliver.statusCode).toBe(404);
+  });
+});
+
+describe("fanOutRecentEvents: exit, liquidation and repo events", () => {
+  const now = new Date("2026-10-08T12:00:00Z");
+  const sub = (id: string, partyId: string, events: string[], createdAt = new Date("2026-10-01T00:00:00Z")) => ({
+    id, partyId, url: "https://hooks.example.com/x", events, secretCiphertext: "x", active: true, createdAt,
+  });
+
+  it("tells the holder when an exit quote is filled", async () => {
+    const { db, inserts } = outboxDb(
+      new Map<unknown, unknown[]>([
+        [schema.webhookSubscription, [sub("s-holder", "holder", ["exit.filled"]), sub("s-other", "other", ["exit.filled"])]],
+        [schema.exitFill, [{ id: "f1", quoteId: "q1", txHash: "tx1", createdAt: new Date("2026-10-08T11:00:00Z") }]],
+        [schema.exitQuote, [{ id: "q1", holderId: "holder", units: "10.0000000", usdcOut: "10.7000000" }]],
+      ]),
+    );
+    await fanOutRecentEvents(db, now);
+    expect(inserts.map((i) => `${i.values.subscriptionId}|${i.values.eventKey}`)).toEqual(["s-holder|exit_fill:f1"]);
+    expect(inserts[0].values.payload).toMatchObject({ event: "exit.filled", data: { quoteId: "q1", usdcOut: "10.7000000", txHash: "tx1" } });
+  });
+
+  it("reports a liquidation as completed only once the lender has closed it", async () => {
+    const line = { id: "l1", lenderId: "lender", borrowerId: "borrower" };
+    const done = new Date("2026-10-08T10:00:00Z");
+    const { db, inserts } = outboxDb(
+      new Map<unknown, unknown[]>([
+        [schema.webhookSubscription, [sub("s-lender", "lender", ["liquidation.completed"]), sub("s-borrower", "borrower", ["liquidation.completed"])]],
+        [schema.creditLine, [line]],
+        [schema.liquidation, [
+          { id: "open", creditLineId: "l1", units: "100", proceeds: null, shortfall: null, completedAt: done },
+          { id: "closed", creditLineId: "l1", units: "100", proceeds: "107.6", shortfall: "0", completedAt: done },
+        ]],
+      ]),
+    );
+    await fanOutRecentEvents(db, now);
+    expect(inserts.map((i) => i.values.eventKey)).toEqual(["liquidation:closed", "liquidation:closed"]);
+    expect(inserts[0].values.payload).toMatchObject({ data: { proceeds: "107.6", shortfall: "0" } });
+  });
+
+  it("announces repo leg 1 to both sides, from the settled accept transaction", async () => {
+    const { db, inserts } = outboxDb(
+      new Map<unknown, unknown[]>([
+        [schema.webhookSubscription, [sub("s-lender", "lender", ["repo.leg1_settled"]), sub("s-borrower", "borrower", ["repo.leg1_settled"])]],
+        [schema.repoTrade, [{ id: "t1", cashLenderId: "lender", cashBorrowerId: "borrower", units: "100", cashAmount: "50", maturityAt: new Date("2026-10-09T00:00:00Z") }]],
+        [schema.txIntent, [
+          { txHash: "accept-tx", kind: "repo.accept", status: "settled", refId: "t1", settledAt: new Date("2026-10-08T09:00:00Z") },
+          { txHash: "pending-tx", kind: "repo.accept", status: "pending", refId: "t1", settledAt: null },
+          { txHash: "other-tx", kind: "repo.unwind", status: "settled", refId: "t1", settledAt: new Date("2026-10-08T09:30:00Z") },
+        ]],
+      ]),
+    );
+    await fanOutRecentEvents(db, now);
+    expect(inserts.map((i) => i.values.eventKey)).toEqual(["tx_intent:accept-tx", "tx_intent:accept-tx"]);
+  });
+
+  it("does not send a new subscriber what happened before it subscribed", async () => {
+    const { db, inserts } = outboxDb(
+      new Map<unknown, unknown[]>([
+        [schema.webhookSubscription, [sub("s-new", "holder", ["exit.filled"], new Date("2026-10-08T11:30:00Z"))]],
+        [schema.exitFill, [{ id: "f1", quoteId: "q1", txHash: "tx1", createdAt: new Date("2026-10-08T11:00:00Z") }]],
+        [schema.exitQuote, [{ id: "q1", holderId: "holder", units: "10", usdcOut: "10" }]],
+      ]),
+    );
+    await fanOutRecentEvents(db, now);
+    expect(inserts).toHaveLength(0);
   });
 });

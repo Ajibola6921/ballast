@@ -28,4 +28,7 @@ export const DELIVERABLE_WEBHOOK_EVENTS = [
   "margin.call_issued",
   "margin.cured",
   "liquidation.started",
+  "liquidation.completed",
+  "exit.filled",
+  "repo.leg1_settled",
 ] as const satisfies readonly WebhookEvent[];

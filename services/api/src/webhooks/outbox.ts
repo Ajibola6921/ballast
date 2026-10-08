@@ -52,6 +52,8 @@ export async function fanOutRecentEvents(db: Database, now: Date = new Date()): 
 
   let enqueued = 0;
   const enqueue = async (sub: Subscription, eventKey: string, event: WebhookEvent, payload: WebhookPayload) => {
+    // A new subscriber is told what happens from now on, not the last day's history.
+    if (new Date(payload.occurredAt) < sub.createdAt) return;
     const inserted = await db
       .insert(schema.webhookDelivery)
       .values({ subscriptionId: sub.id, eventKey, event, payload, status: "pending", nextAttemptAt: now })
@@ -101,6 +103,69 @@ export async function fanOutRecentEvents(db: Database, now: Date = new Date()): 
       });
       for (const sub of priceSubs) {
         await enqueue(sub, `price_snapshot:${snap.id}`, "price.status_changed", payload);
+      }
+    }
+  }
+  const wanting = (event: WebhookEvent, partyIds: string[]) =>
+    active.filter((s) => partyIds.includes(s.partyId) && wants(s, event));
+
+  // A liquidated line the lender has closed: the books now hold the outcome.
+  const liquidations = (await db.select().from(schema.liquidation)).filter(
+    (l) => l.proceeds !== null && l.completedAt !== null && l.completedAt >= since,
+  );
+  if (liquidations.length > 0) {
+    const lines = new Map((await db.select().from(schema.creditLine)).map((l) => [l.id, l]));
+    for (const liq of liquidations) {
+      const line = lines.get(liq.creditLineId);
+      if (!line) continue;
+      const payload = payloadFor("liquidation.completed", liq.completedAt!, {
+        creditLineId: liq.creditLineId,
+        units: liq.units,
+        proceeds: liq.proceeds,
+        shortfall: liq.shortfall,
+      });
+      for (const sub of wanting("liquidation.completed", [line.lenderId, line.borrowerId])) {
+        await enqueue(sub, `liquidation:${liq.id}`, "liquidation.completed", payload);
+      }
+    }
+  }
+
+  const fills = (await db.select().from(schema.exitFill)).filter((f) => f.createdAt >= since);
+  if (fills.length > 0) {
+    const quotes = new Map((await db.select().from(schema.exitQuote)).map((q) => [q.id, q]));
+    for (const fill of fills) {
+      const quote = quotes.get(fill.quoteId);
+      if (!quote) continue;
+      const payload = payloadFor("exit.filled", fill.createdAt, {
+        quoteId: fill.quoteId,
+        units: quote.units,
+        usdcOut: quote.usdcOut,
+        txHash: fill.txHash,
+      });
+      for (const sub of wanting("exit.filled", [quote.holderId])) {
+        await enqueue(sub, `exit_fill:${fill.id}`, "exit.filled", payload);
+      }
+    }
+  }
+
+  // Leg 1 of a repo settles when the cash borrower's accept transaction does.
+  const accepts = (await db.select().from(schema.txIntent)).filter(
+    (i) => i.kind === "repo.accept" && i.status === "settled" && i.settledAt !== null && i.settledAt >= since,
+  );
+  if (accepts.length > 0) {
+    const trades = new Map((await db.select().from(schema.repoTrade)).map((t) => [t.id, t]));
+    for (const intent of accepts) {
+      const trade = intent.refId ? trades.get(intent.refId) : undefined;
+      if (!trade) continue;
+      const payload = payloadFor("repo.leg1_settled", intent.settledAt!, {
+        tradeId: trade.id,
+        units: trade.units,
+        cashAmount: trade.cashAmount,
+        maturityAt: trade.maturityAt,
+        txHash: intent.txHash,
+      });
+      for (const sub of wanting("repo.leg1_settled", [trade.cashLenderId, trade.cashBorrowerId])) {
+        await enqueue(sub, `tx_intent:${intent.txHash}`, "repo.leg1_settled", payload);
       }
     }
   }
