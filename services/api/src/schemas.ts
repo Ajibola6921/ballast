@@ -29,6 +29,12 @@ export const fundCreditLineSchema = z.object({
   amount: bigintish,
 });
 
+export const withdrawSchema = z.object({
+  /** `undrawn` returns committed USDC (including repaid principal); `interest` returns repaid interest. */
+  kind: z.enum(["undrawn", "interest"]),
+  amount: bigintish,
+});
+
 export const createDrawSchema = z.object({
   amount: bigintish,
   to: z.string(),

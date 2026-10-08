@@ -4,7 +4,7 @@
  * when a route builds a transaction; `settleIntent` runs once the network has a final status for
  * it and applies that intent's effect to Postgres exactly once.
  */
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
 import { scaledToDecimalString } from "@ballast/domain-types";
 import { UNSIGNED_TX_TIMEOUT_S } from "@ballast/contract-clients";
@@ -15,6 +15,8 @@ import { outstandingDebt } from "./routes/helpers.js";
 export type IntentKind =
   | "credit_line.open"
   | "credit_line.fund"
+  | "credit_line.withdraw"
+  | "credit_line.close_liquidated"
   | "credit_line.draw"
   | "credit_line.repay"
   | "pledge.create"
@@ -86,6 +88,38 @@ async function applySuccess(
 
     case "credit_line.fund":
       return; // moves the lender's USDC into the contract; nothing in `credit_line` tracks it
+
+    case "credit_line.withdraw":
+      return; // moves USDC from the contract back to the lender; nothing in `credit_line` tracks it
+
+    case "credit_line.close_liquidated": {
+      // The contract values the collateral at the price frozen when the liquidation was confirmed;
+      // the books take its recorded outcome rather than recomputing it.
+      const [line] = await db.select().from(schema.creditLine).where(eq(schema.creditLine.id, refId)).limit(1);
+      const record = await contracts.creditLine.liquidationRecord(BigInt(line.contractLineId!));
+      const [liquidation] = await db
+        .select()
+        .from(schema.liquidation)
+        .where(eq(schema.liquidation.creditLineId, refId))
+        .orderBy(desc(schema.liquidation.startedAt))
+        .limit(1);
+      if (liquidation) {
+        await db
+          .update(schema.liquidation)
+          .set({
+            proceeds: scaledToDecimalString(BigInt(record.recovered)),
+            shortfall: scaledToDecimalString(BigInt(record.shortfall)),
+            txHashes: [...(liquidation.txHashes ?? []), intent.txHash],
+            completedAt: new Date(),
+          })
+          .where(eq(schema.liquidation.id, liquidation.id));
+      }
+      await db
+        .update(schema.creditLine)
+        .set({ status: "closed", closedAt: new Date() })
+        .where(eq(schema.creditLine.id, refId));
+      return;
+    }
 
     case "credit_line.draw":
       await db

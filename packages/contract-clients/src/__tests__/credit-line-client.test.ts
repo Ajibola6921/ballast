@@ -62,4 +62,10 @@ describe("CreditLineClient", () => {
     const xdr = await client.liquidate(source, 1n, "redeem");
     expect(xdr.length).toBeGreaterThan(0);
   });
+
+  it("withdrawUndrawn(), withdrawInterest() and closeLiquidated() return unsigned XDR", async () => {
+    expect((await client.withdrawUndrawn(source, 1n, 100n)).length).toBeGreaterThan(0);
+    expect((await client.withdrawInterest(source, 1n, 5n)).length).toBeGreaterThan(0);
+    expect((await client.closeLiquidated(source, 1n)).length).toBeGreaterThan(0);
+  });
 });

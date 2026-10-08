@@ -102,13 +102,6 @@ export async function runCureExpiryJob(
         }
       }
 
-      const txHashes: string[] = [];
-      if (!alreadyLiquidating) {
-        txHashes.push(
-          await signAndSubmit(signer, await creditLineClient.liquidate(keeper, contractLine, "transfer")),
-        );
-      }
-
       const [lenderAccount] = await db
         .select()
         .from(schema.partyAccount)
@@ -125,6 +118,25 @@ export async function runCureExpiryJob(
       const pledgesByAsset = new Map<string, typeof pledges>();
       for (const pledge of pledges) {
         pledgesByAsset.set(pledge.assetId, [...(pledgesByAsset.get(pledge.assetId) ?? []), pledge]);
+      }
+
+      // `CreditLine.liquidate` records the units it believes are pledged, and the lender is paid
+      // from exactly those when the line is closed. If a pledge or release has not been synced
+      // on-chain yet the two disagree, and seizing the books' figure would take collateral the
+      // contract never counted. Wait for the sync-collateral job instead.
+      if (!alreadyLiquidating) {
+        const booked = pledges.reduce((sum, p) => sum + decimalStringToScaled(p.units), 0n);
+        if (booked !== BigInt(onChain.pledgedUnits)) {
+          result.skipped++;
+          continue;
+        }
+      }
+
+      const txHashes: string[] = [];
+      if (!alreadyLiquidating) {
+        txHashes.push(
+          await signAndSubmit(signer, await creditLineClient.liquidate(keeper, contractLine, "transfer")),
+        );
       }
 
       let totalUnits = 0n;

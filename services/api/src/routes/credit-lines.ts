@@ -11,6 +11,7 @@ import {
   createRepaymentSchema,
   fundCreditLineSchema,
   openCreditLineSchema,
+  withdrawSchema,
 } from "../schemas.js";
 import { estimateLtvBps, outstandingDebt, requireAsset, requireCreditLine, requireStellarAccount } from "./helpers.js";
 
@@ -83,6 +84,13 @@ export function registerCreditLineRoutes(
     let priceStatus: string | null = null;
     let collateralValue: string | null = null;
     let funded: string | null = null;
+    let liquidation: {
+      closed: boolean;
+      debt: string;
+      recovered: string;
+      surplus: string;
+      shortfall: string;
+    } | null = null;
 
     // Once the line exists on-chain the contract's own view is authoritative (it includes accrued
     // interest and uses the live guarded price); the Postgres-derived figures above are only the
@@ -99,6 +107,16 @@ export function registerCreditLineRoutes(
         priceStatus = view.priceStatus;
         collateralValue = BigInt(view.collateralValue).toString();
         funded = BigInt(onChain.funded).toString();
+        if (onChain.status !== "Open") {
+          const record = await contracts.creditLine.liquidationRecord(BigInt(line.contractLineId));
+          liquidation = {
+            closed: record.closed,
+            debt: BigInt(record.debt).toString(),
+            recovered: BigInt(record.recovered).toString(),
+            surplus: BigInt(record.surplus).toString(),
+            shortfall: BigInt(record.shortfall).toString(),
+          };
+        }
       } catch (err) {
         request.log.warn({ err, creditLineId: line.id }, "on-chain ltv read failed; using Postgres estimate");
       }
@@ -124,6 +142,7 @@ export function registerCreditLineRoutes(
       funded,
       collateralValue,
       priceStatus,
+      liquidation,
     };
   });
 
@@ -153,6 +172,70 @@ export function registerCreditLineRoutes(
       refId: line.id,
       partyId: request.partyId,
       payload: { amount: body.amount.toString() },
+    });
+    return reply.code(201).send({ xdr, txHash });
+  });
+
+  // The lender's way out: without these, repaid principal and interest would sit in the contract
+  // for good, since `fund` is the only other thing that touches the lender's USDC.
+  app.post<{ Params: { id: string } }>("/v1/credit-lines/:id/withdrawals", async (request, reply) => {
+    const body = withdrawSchema.parse(request.body);
+    let line;
+    try {
+      line = await requireCreditLine(db, request.params.id);
+    } catch {
+      return reply.code(404).send({ error: "credit line not found" });
+    }
+    if (!line.contractLineId) {
+      return reply.code(409).send({ error: "credit line has not settled on-chain yet" });
+    }
+    if (line.lenderId !== request.partyId) {
+      return reply.code(403).send({ error: "only this line's lender may withdraw from it" });
+    }
+
+    const lenderAccount = await requireStellarAccount(db, line.lenderId);
+    const contractLine = BigInt(line.contractLineId);
+    const xdr =
+      body.kind === "undrawn"
+        ? await contracts.creditLine.withdrawUndrawn(lenderAccount, contractLine, body.amount)
+        : await contracts.creditLine.withdrawInterest(lenderAccount, contractLine, body.amount);
+    const txHash = await recordIntent(db, chain, {
+      xdr,
+      kind: "credit_line.withdraw",
+      refId: line.id,
+      partyId: request.partyId,
+      payload: { kind: body.kind, amount: body.amount.toString() },
+    });
+    return reply.code(201).send({ xdr, txHash });
+  });
+
+  // After the keeper has liquidated a line and sent the collateral to the lender in kind, the
+  // lender closes it: the contract books the outcome and, if the collateral was worth more than the
+  // debt, pays the borrower the difference out of the lender's USDC in the same transaction.
+  app.post<{ Params: { id: string } }>("/v1/credit-lines/:id/close-liquidation", async (request, reply) => {
+    let line;
+    try {
+      line = await requireCreditLine(db, request.params.id);
+    } catch {
+      return reply.code(404).send({ error: "credit line not found" });
+    }
+    if (!line.contractLineId) {
+      return reply.code(409).send({ error: "credit line has not settled on-chain yet" });
+    }
+    if (line.lenderId !== request.partyId) {
+      return reply.code(403).send({ error: "only this line's lender may close it" });
+    }
+    if (line.status !== "liquidating") {
+      return reply.code(409).send({ error: `credit line is ${line.status}, not liquidating` });
+    }
+
+    const lenderAccount = await requireStellarAccount(db, line.lenderId);
+    const xdr = await contracts.creditLine.closeLiquidated(lenderAccount, BigInt(line.contractLineId));
+    const txHash = await recordIntent(db, chain, {
+      xdr,
+      kind: "credit_line.close_liquidated",
+      refId: line.id,
+      partyId: request.partyId,
     });
     return reply.code(201).send({ xdr, txHash });
   });

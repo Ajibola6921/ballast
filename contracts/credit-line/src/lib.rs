@@ -46,6 +46,7 @@ use ballast_common::{
 };
 use soroban_sdk::{
     contract, contractclient, contractimpl, contracttype, token, Address, BytesN, Env, MuxedAddress,
+    Symbol,
 };
 
 const SECONDS_PER_YEAR: i128 = 365 * 24 * 60 * 60;
@@ -93,6 +94,29 @@ pub struct AssetConfig {
 pub enum LineStatus {
     Open,
     Liquidating,
+    /// A liquidated line whose outcome has been booked by `close_liquidated`. Terminal.
+    Closed,
+}
+
+/// What a liquidation took and what it was worth, recorded by `liquidate` and completed by
+/// `close_liquidated`. `debt` and `price` are frozen at the moment the breach was confirmed, so the
+/// outcome cannot be moved by when the lender chooses to close the line.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct LiquidationRecord {
+    /// The whole pledged position; the keeper must liquidate all of it in `PledgeVault`.
+    pub seized_units: i128,
+    /// Guarded price (7-decimal) read when the breach was confirmed.
+    pub price: i128,
+    /// Principal plus interest owed at that moment.
+    pub debt: i128,
+    pub closed: bool,
+    /// `seized_units * price`, no haircut. Zero until the line is closed.
+    pub recovered: i128,
+    /// Value of the collateral above the debt, paid by the lender to the borrower in USDC.
+    pub surplus: i128,
+    /// Debt the collateral did not cover: the lender's loss.
+    pub shortfall: i128,
 }
 
 #[contracttype]
@@ -127,6 +151,22 @@ enum DataKey {
     AssetConfig(Address),
     NextLineId,
     Line(u64),
+    /// Interest repaid on a line that the lender has not withdrawn yet.
+    Claimable(u64),
+    Liquidation(u64),
+}
+
+fn read_claimable(env: &Env, line: u64) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Claimable(line))
+        .unwrap_or(0)
+}
+
+fn write_claimable(env: &Env, line: u64, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Claimable(line), &amount);
 }
 
 fn read_line(env: &Env, line: u64) -> Line {
@@ -159,6 +199,11 @@ fn interest_delta(line: &Line, now: u64) -> i128 {
 /// Recomputes debt, collateral value, and LTV for `line` from a fresh guarded price read. Doesn't
 /// persist anything — read-only, used by the `ltv` view, `poke`, `draw`, and `liquidate`.
 fn compute_ltv(env: &Env, line: &Line) -> LtvView {
+    read_ltv(env, line).0
+}
+
+/// Same as `compute_ltv`, also returning the guarded price the view was computed from.
+fn read_ltv(env: &Env, line: &Line) -> (LtvView, i128) {
     let config = read_asset_config(env, &line.asset);
     let guarded = PriceGuardClient::new(env, &config.price_guard).guarded_price(&line.asset);
 
@@ -168,13 +213,16 @@ fn compute_ltv(env: &Env, line: &Line) -> LtvView {
     let ltv_bps = risk::ltv_bps(debt, collateral_value);
     let margin_state = margin::classify(ltv_bps, &config.thresholds);
 
-    LtvView {
-        debt,
-        collateral_value,
-        ltv_bps,
-        state: margin_state,
-        price_status: guarded.status,
-    }
+    (
+        LtvView {
+            debt,
+            collateral_value,
+            ltv_bps,
+            state: margin_state,
+            price_status: guarded.status,
+        },
+        guarded.value,
+    )
 }
 
 #[contract]
@@ -285,6 +333,10 @@ impl CreditLine {
 
         let mut state = read_line(&env, line);
         assert_eq!(state.lender, lender, "credit-line: not this line's lender");
+        assert!(
+            state.status != LineStatus::Closed,
+            "credit-line: line is closed"
+        );
 
         let config = read_asset_config(&env, &state.asset);
         token::Client::new(&env, &config.usdc).transfer(
@@ -337,6 +389,10 @@ impl CreditLine {
             amount <= state.funded - state.drawn,
             "credit-line: draw exceeds funded-but-undrawn balance"
         );
+        assert!(
+            state.drawn + amount <= state.limit,
+            "credit-line: draw exceeds the line's limit"
+        );
 
         let config = read_asset_config(&env, &state.asset);
         let guarded = PriceGuardClient::new(&env, &config.price_guard).guarded_price(&state.asset);
@@ -382,6 +438,8 @@ impl CreditLine {
         let pay_interest = remaining.min(state.accrued_interest);
         state.accrued_interest -= pay_interest;
         remaining -= pay_interest;
+        // Interest belongs to the lender, who takes it out with `withdraw_interest`.
+        write_claimable(&env, line, read_claimable(&env, line) + pay_interest);
 
         let pay_principal = remaining.min(state.drawn);
         state.drawn -= pay_principal;
@@ -447,7 +505,12 @@ impl CreditLine {
             "credit-line: liquidation needs a later ledger than the flagged breach"
         );
 
-        let view = compute_ltv(&env, &state);
+        assert!(
+            state.status == LineStatus::Open,
+            "credit-line: line is not open"
+        );
+
+        let (view, price) = read_ltv(&env, &state);
         assert!(
             matches!(view.price_status, PriceStatus::Ok),
             "credit-line: price status is not Ok"
@@ -457,9 +520,148 @@ impl CreditLine {
             "credit-line: breach is no longer confirmed"
         );
 
+        // Freeze what the outcome will be measured against: the whole position, the confirmed
+        // price and the debt at this moment (see `LiquidationRecord`).
+        env.storage().persistent().set(
+            &DataKey::Liquidation(line),
+            &LiquidationRecord {
+                seized_units: state.pledged_units,
+                price,
+                debt: view.debt,
+                closed: false,
+                recovered: 0,
+                surplus: 0,
+                shortfall: 0,
+            },
+        );
+
         state.status = LineStatus::Liquidating;
         state.margin_state = MarginState::Liquidation;
         write_line(&env, line, &state);
+    }
+
+    /// Books the outcome of a liquidation and closes the line. Called by the lender once the
+    /// keeper has moved the collateral to them in kind (`PledgeVault::liquidate`).
+    ///
+    /// The collateral is valued at the guarded price confirmed when the breach was flagged
+    /// (`LiquidationRecord`), not at a price the lender supplies, so the lender cannot understate
+    /// what they received. If it is worth more than the debt the lender pays the difference to the
+    /// borrower in USDC in this same call (that is why it needs the lender's auth); if it is worth
+    /// less, the gap is recorded as the lender's shortfall. Principal that was lent out and not
+    /// repaid is written off the line's funded balance, so what is left in `funded` is exactly the
+    /// USDC still held here and withdrawable with `withdraw_undrawn`.
+    pub fn close_liquidated(env: Env, lender: Address, line: u64) {
+        lender.require_auth();
+
+        let mut state = read_line(&env, line);
+        assert_eq!(state.lender, lender, "credit-line: not this line's lender");
+        assert!(
+            state.status == LineStatus::Liquidating,
+            "credit-line: line is not being liquidated"
+        );
+
+        let mut record: LiquidationRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Liquidation(line))
+            .expect("credit-line: no liquidation record");
+
+        let recovered = risk::collateral_value(record.seized_units, record.price, 0);
+        let surplus = (recovered - record.debt).max(0);
+        let shortfall = (record.debt - recovered).max(0);
+
+        if surplus > 0 {
+            let config = read_asset_config(&env, &state.asset);
+            token::Client::new(&env, &config.usdc).transfer(
+                &lender,
+                muxed(&state.borrower),
+                &surplus,
+            );
+        }
+
+        state.funded -= state.drawn;
+        state.drawn = 0;
+        state.accrued_interest = 0;
+        state.pledged_units = 0;
+        state.margin_state = MarginState::Healthy;
+        state.breach_ledger = None;
+        state.breach_ltv_bps = 0;
+        state.status = LineStatus::Closed;
+        write_line(&env, line, &state);
+
+        record.closed = true;
+        record.recovered = recovered;
+        record.surplus = surplus;
+        record.shortfall = shortfall;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Liquidation(line), &record);
+
+        env.events().publish(
+            (Symbol::new(&env, "line_closed"), line),
+            (record.debt, recovered, surplus, shortfall),
+        );
+    }
+
+    /// Takes undrawn USDC back out of the line (reducing the commitment). Repaid principal returns
+    /// to the undrawn balance, so this is also how a lender gets principal back.
+    pub fn withdraw_undrawn(env: Env, lender: Address, line: u64, amount: i128) {
+        lender.require_auth();
+        assert!(amount > 0, "credit-line: amount must be positive");
+
+        let mut state = read_line(&env, line);
+        assert_eq!(state.lender, lender, "credit-line: not this line's lender");
+        assert!(
+            amount <= state.funded - state.drawn,
+            "credit-line: withdrawal exceeds the undrawn balance"
+        );
+
+        state.funded -= amount;
+        write_line(&env, line, &state);
+
+        let config = read_asset_config(&env, &state.asset);
+        token::Client::new(&env, &config.usdc).transfer(
+            &env.current_contract_address(),
+            muxed(&lender),
+            &amount,
+        );
+    }
+
+    /// Takes repaid interest out of the contract. Interest is tracked separately from principal
+    /// (it never counts as undrawn funding) so it can be withdrawn without touching the commitment.
+    pub fn withdraw_interest(env: Env, lender: Address, line: u64, amount: i128) {
+        lender.require_auth();
+        assert!(amount > 0, "credit-line: amount must be positive");
+
+        let state = read_line(&env, line);
+        assert_eq!(state.lender, lender, "credit-line: not this line's lender");
+        let claimable = read_claimable(&env, line);
+        assert!(
+            amount <= claimable,
+            "credit-line: withdrawal exceeds the interest repaid"
+        );
+
+        write_claimable(&env, line, claimable - amount);
+
+        let config = read_asset_config(&env, &state.asset);
+        token::Client::new(&env, &config.usdc).transfer(
+            &env.current_contract_address(),
+            muxed(&lender),
+            &amount,
+        );
+    }
+
+    /// Interest repaid on `line` and not yet withdrawn.
+    pub fn claimable_interest(env: Env, line: u64) -> i128 {
+        read_claimable(&env, line)
+    }
+
+    /// The recorded liquidation outcome for `line`, if it was liquidated.
+    pub fn liquidation_record(env: Env, line: u64) -> LiquidationRecord {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Liquidation(line))
+            .expect("credit-line: line was not liquidated")
     }
 
     /// Read-only helper for consoles/tests.
@@ -479,7 +681,7 @@ impl CreditLine {
 mod test {
     use super::*;
     use ballast_common::price::PRICE_SCALE;
-    use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+    use soroban_sdk::testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke};
     use soroban_sdk::IntoVal;
 
     // A minimal in-crate mock token implementing just `transfer`/`balance`/`mint` — same
@@ -766,5 +968,194 @@ mod test {
             result.is_err(),
             "credit-line: fund must not succeed on admin's authorization alone"
         );
+    }
+
+    // --- lender withdrawals -------------------------------------------------------------
+
+    #[test]
+    fn lender_gets_repaid_principal_back_through_withdraw_undrawn() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let id = open_and_fund(&h, 1_000 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+        h.credit_line.sync_collateral(&h.admin, &id, &(1_000 * PRICE_SCALE));
+
+        h.credit_line.draw(&h.borrower, &id, &(500 * PRICE_SCALE), &h.borrower.clone());
+        // Only the 500 still sitting in the contract can be taken out.
+        let over = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.credit_line.withdraw_undrawn(&h.lender, &id, &(600 * PRICE_SCALE));
+        }));
+        assert!(over.is_err(), "cannot withdraw USDC that is out on loan");
+
+        h.token.mint(&h.borrower, &0);
+        h.credit_line.repay(&h.borrower, &id, &(500 * PRICE_SCALE));
+        h.credit_line.withdraw_undrawn(&h.lender, &id, &(1_000 * PRICE_SCALE));
+
+        assert_eq!(h.token.balance(&h.lender), 1_000 * PRICE_SCALE);
+        assert_eq!(h.token.balance(&h.credit_line.address), 0);
+        assert_eq!(h.credit_line.line(&id).funded, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "credit-line: not this line's lender")]
+    fn only_the_lender_can_withdraw() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let id = open_and_fund(&h, 1_000 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+        h.credit_line.withdraw_undrawn(&h.borrower, &id, &(1 * PRICE_SCALE));
+    }
+
+    #[test]
+    fn repaid_interest_is_withdrawable_and_separate_from_the_commitment() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let id = open_and_fund(&h, 1_000 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+        h.credit_line.sync_collateral(&h.admin, &id, &(1_000 * PRICE_SCALE));
+        h.credit_line.draw(&h.borrower, &id, &(500 * PRICE_SCALE), &h.borrower.clone());
+
+        // One year at 10% (1_000 bps) on 500 is 50 of interest.
+        h.env.ledger().set_timestamp(h.env.ledger().timestamp() + 365 * 24 * 60 * 60);
+        h.token.mint(&h.borrower, &(50 * PRICE_SCALE));
+        h.credit_line.repay(&h.borrower, &id, &(550 * PRICE_SCALE));
+
+        assert_eq!(h.credit_line.claimable_interest(&id), 50 * PRICE_SCALE);
+        let over = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.credit_line.withdraw_interest(&h.lender, &id, &(51 * PRICE_SCALE));
+        }));
+        assert!(over.is_err(), "cannot withdraw more interest than was repaid");
+
+        h.credit_line.withdraw_interest(&h.lender, &id, &(50 * PRICE_SCALE));
+        assert_eq!(h.token.balance(&h.lender), 50 * PRICE_SCALE);
+        assert_eq!(h.credit_line.claimable_interest(&id), 0);
+        // Principal is untouched: the full 1,000 is still undrawn and withdrawable.
+        h.credit_line.withdraw_undrawn(&h.lender, &id, &(1_000 * PRICE_SCALE));
+        assert_eq!(h.token.balance(&h.credit_line.address), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "credit-line: draw exceeds the line's limit")]
+    fn draw_cannot_exceed_the_limit_even_if_overfunded() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let id = open_and_fund(&h, 500 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+        h.credit_line.sync_collateral(&h.admin, &id, &(10_000 * PRICE_SCALE));
+        h.credit_line.draw(&h.borrower, &id, &(600 * PRICE_SCALE), &h.borrower.clone());
+    }
+
+    // --- liquidation ----------------------------------------------------------------------
+
+    /// Draws 600 against 1,000 units at $1, crashes the price to `crash`, and walks the line
+    /// through poke -> later ledger -> poke -> liquidate.
+    fn liquidated_line(h: &Harness, crash: i128) -> u64 {
+        let id = open_and_fund(h, 1_000 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+        h.credit_line.sync_collateral(&h.admin, &id, &(1_000 * PRICE_SCALE));
+        h.credit_line.draw(&h.borrower, &id, &(600 * PRICE_SCALE), &h.borrower.clone());
+
+        h.price_guard.set_price(&crash, &PriceStatus::Ok);
+        h.credit_line.poke(&id);
+        h.env.ledger().set_sequence_number(h.env.ledger().sequence() + 2);
+        h.credit_line.poke(&id);
+        h.credit_line.liquidate(&Address::generate(&h.env), &id, &LiquidationRoute::Transfer);
+        id
+    }
+
+    #[test]
+    fn liquidation_needs_a_later_ledger_than_the_flagged_breach() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let id = open_and_fund(&h, 1_000 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+        h.credit_line.sync_collateral(&h.admin, &id, &(1_000 * PRICE_SCALE));
+        h.credit_line.draw(&h.borrower, &id, &(600 * PRICE_SCALE), &h.borrower.clone());
+        h.price_guard.set_price(&(PRICE_SCALE / 2), &PriceStatus::Ok);
+
+        h.credit_line.poke(&id);
+        let same_ledger = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.credit_line.liquidate(&Address::generate(&h.env), &id, &LiquidationRoute::Transfer);
+        }));
+        assert!(same_ledger.is_err(), "a single read must not be enough to liquidate");
+
+        h.env.ledger().set_sequence_number(h.env.ledger().sequence() + 2);
+        h.credit_line.liquidate(&Address::generate(&h.env), &id, &LiquidationRoute::Transfer);
+        assert_eq!(h.credit_line.line(&id).status, LineStatus::Liquidating);
+    }
+
+    #[test]
+    fn closing_a_shortfall_books_the_loss_and_frees_the_rest_of_the_funding() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        // $0.50: 1,000 units are worth 500 against 600 of debt.
+        let id = liquidated_line(&h, PRICE_SCALE / 2);
+
+        h.credit_line.close_liquidated(&h.lender, &id);
+
+        let record = h.credit_line.liquidation_record(&id);
+        assert!(record.closed);
+        assert_eq!(record.debt, 600 * PRICE_SCALE);
+        assert_eq!(record.recovered, 500 * PRICE_SCALE);
+        assert_eq!(record.shortfall, 100 * PRICE_SCALE);
+        assert_eq!(record.surplus, 0);
+
+        let line = h.credit_line.line(&id);
+        assert_eq!(line.status, LineStatus::Closed);
+        assert_eq!((line.drawn, line.accrued_interest, line.pledged_units), (0, 0, 0));
+        // 1,000 funded, 600 went out and is not coming back: 400 is still here and withdrawable.
+        assert_eq!(line.funded, 400 * PRICE_SCALE);
+        h.credit_line.withdraw_undrawn(&h.lender, &id, &(400 * PRICE_SCALE));
+        assert_eq!(h.token.balance(&h.credit_line.address), 0);
+    }
+
+    #[test]
+    fn closing_with_a_surplus_pays_the_borrower_from_the_lender() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        // $0.64: 1,000 units are worth 640 against 600 of debt (LTV 93.75%, past liquidation).
+        let id = liquidated_line(&h, 64 * PRICE_SCALE / 100);
+        let borrower_before = h.token.balance(&h.borrower);
+        h.token.mint(&h.lender, &(40 * PRICE_SCALE)); // the lender needs USDC to pay the surplus
+
+        // The price recovering afterwards must not change the outcome: it is frozen at liquidation.
+        h.price_guard.set_price(&(2 * PRICE_SCALE), &PriceStatus::Ok);
+        h.credit_line.close_liquidated(&h.lender, &id);
+
+        let record = h.credit_line.liquidation_record(&id);
+        assert_eq!(record.recovered, 640 * PRICE_SCALE);
+        assert_eq!(record.surplus, 40 * PRICE_SCALE);
+        assert_eq!(record.shortfall, 0);
+        assert_eq!(h.token.balance(&h.borrower) - borrower_before, 40 * PRICE_SCALE);
+        assert_eq!(h.token.balance(&h.lender), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "credit-line: line is not being liquidated")]
+    fn an_open_line_cannot_be_closed_as_liquidated() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let id = open_and_fund(&h, 1_000 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+        h.credit_line.close_liquidated(&h.lender, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "credit-line: not this line's lender")]
+    fn only_the_lender_can_close_a_liquidated_line() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let id = liquidated_line(&h, PRICE_SCALE / 2);
+        h.credit_line.close_liquidated(&h.borrower, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "credit-line: line is not being liquidated")]
+    fn a_line_cannot_be_closed_twice() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let id = liquidated_line(&h, PRICE_SCALE / 2);
+        h.credit_line.close_liquidated(&h.lender, &id);
+        h.credit_line.close_liquidated(&h.lender, &id);
+    }
+
+    #[test]
+    fn a_closed_line_accepts_no_more_draws_or_funding() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let id = liquidated_line(&h, PRICE_SCALE / 2);
+        h.credit_line.close_liquidated(&h.lender, &id);
+
+        let draw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.credit_line.draw(&h.borrower, &id, &PRICE_SCALE, &h.borrower.clone());
+        }));
+        assert!(draw.is_err(), "draw on a closed line must fail");
+        h.token.mint(&h.lender, &PRICE_SCALE);
+        let fund = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.credit_line.fund(&h.lender, &id, &PRICE_SCALE);
+        }));
+        assert!(fund.is_err(), "fund on a closed line must fail");
     }
 }

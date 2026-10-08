@@ -133,7 +133,7 @@ describe("runCureExpiryJob", () => {
         { toState: "Healthy", createdAt: longAgo() },
       ]),
     );
-    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100 });
+    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100, pledgedUnits: 1_500_000_000n });
 
     expect(await run(db, c)).toEqual({ processed: 0, skipped: 1, errors: [] });
     expect(submitMock).not.toHaveBeenCalled();
@@ -148,7 +148,7 @@ describe("runCureExpiryJob", () => {
         { toState: "MarginCall", createdAt: longAgo() },
       ]),
     );
-    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100 });
+    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100, pledgedUnits: 1_500_000_000n });
 
     expect(await run(db, c)).toEqual({ processed: 1, skipped: 0, errors: [] });
 
@@ -168,6 +168,20 @@ describe("runCureExpiryJob", () => {
     });
   });
 
+  it("waits for sync-collateral when the contract's pledged units differ from the books", async () => {
+    const { db, inserted } = makeDb(fixtures([{ toState: "Liquidation", createdAt: longAgo() }]));
+    // A 50-unit pledge is booked but not yet pushed on-chain: the contract still counts 100.
+    const c = clients(
+      { state: "Liquidation", priceStatus: "Ok" },
+      { status: "Open", breachLedger: 100, pledgedUnits: 1_000_000_000n },
+    );
+
+    expect(await run(db, c)).toEqual({ processed: 0, skipped: 1, errors: [] });
+    expect(c.creditLine.liquidate).not.toHaveBeenCalled();
+    expect(c.vault.liquidate).not.toHaveBeenCalled();
+    expect(inserted).toHaveLength(0);
+  });
+
   it("resumes at the vault when the line is already Liquidating on-chain", async () => {
     const { db, updated } = makeDb(fixtures([{ toState: "Liquidation", createdAt: new Date() }]));
     const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Liquidating", breachLedger: 100 });
@@ -180,7 +194,7 @@ describe("runCureExpiryJob", () => {
 
   it("records an error and books nothing when a submission fails", async () => {
     const { db, inserted } = makeDb(fixtures([{ toState: "Liquidation", createdAt: longAgo() }]));
-    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100 });
+    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100, pledgedUnits: 1_500_000_000n });
     submitMock.mockRejectedValue(new Error("rpc down"));
 
     const result = await run(db, c);

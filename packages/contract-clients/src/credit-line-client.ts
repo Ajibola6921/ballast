@@ -42,9 +42,20 @@ export interface OnChainLine {
   drawn: bigint;
   pledgedUnits: bigint;
   accruedInterest: bigint;
-  status: "Open" | "Liquidating";
+  status: "Open" | "Liquidating" | "Closed";
   /** Ledger at which `poke` first saw a liquidation-level breach; unset while there is none. */
   breachLedger?: number | null;
+}
+
+/** The liquidation outcome recorded on-chain (`LiquidationRecord`). Amounts are 7-decimal scaled. */
+export interface OnChainLiquidationRecord {
+  seizedUnits: bigint;
+  price: bigint;
+  debt: bigint;
+  closed: boolean;
+  recovered: bigint;
+  surplus: bigint;
+  shortfall: bigint;
 }
 
 export class CreditLineClient extends BaseContractClient {
@@ -117,5 +128,33 @@ export class CreditLineClient extends BaseContractClient {
       scU64(line),
       enumToScVal(ROUTE_VARIANT[route]),
     ]);
+  }
+
+  /** Lender takes undrawn USDC (including repaid principal) back out of the line. */
+  withdrawUndrawn(source: string, line: bigint, amount: bigint): Promise<string> {
+    return this.invoke(source, "withdraw_undrawn", [scAddress(source), scU64(line), scI128(amount)]);
+  }
+
+  /** Lender takes repaid interest out of the line. */
+  withdrawInterest(source: string, line: bigint, amount: bigint): Promise<string> {
+    return this.invoke(source, "withdraw_interest", [scAddress(source), scU64(line), scI128(amount)]);
+  }
+
+  /**
+   * Lender books a liquidation's outcome and closes the line. If the collateral was worth more than
+   * the debt this also pays the surplus to the borrower out of the lender's USDC.
+   */
+  closeLiquidated(source: string, line: bigint): Promise<string> {
+    return this.invoke(source, "close_liquidated", [scAddress(source), scU64(line)]);
+  }
+
+  /** Read-only: interest repaid on the line and not yet withdrawn. */
+  claimableInterest(line: bigint): Promise<bigint> {
+    return this.read<bigint>("claimable_interest", [scU64(line)]);
+  }
+
+  /** Read-only: the recorded outcome of a liquidated line (throws if it was never liquidated). */
+  liquidationRecord(line: bigint): Promise<OnChainLiquidationRecord> {
+    return this.read<OnChainLiquidationRecord>("liquidation_record", [scU64(line)]);
   }
 }
