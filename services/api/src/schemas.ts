@@ -61,6 +61,11 @@ export const repoTradeActionSchema = z.object({
   contractTradeId: bigintish.optional(),
 });
 
+export const repoTopUpSchema = z.object({
+  /** RWA units to add to the trade's collateral. */
+  units: bigintish,
+});
+
 export const repoProposalSchema = z.object({
   cashLenderId: z.string().uuid(),
   cashBorrowerId: z.string().uuid(),

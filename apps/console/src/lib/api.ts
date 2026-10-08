@@ -165,6 +165,13 @@ export const api = {
   repoAccept: (token: string, tradeId: string) =>
     request<BuiltTx>(`/v1/repo/proposals/${tradeId}/accept`, token, { method: "POST" }),
 
+  /** Cash borrower adds collateral to a settled repo (cures a margin call if it is enough). */
+  repoTopUp: (token: string, tradeId: string, units: bigint) =>
+    request<BuiltTx>(`/v1/repo/trades/${tradeId}/top-ups`, token, {
+      method: "POST",
+      body: JSON.stringify({ units: units.toString() }),
+    }),
+
   repoUnwind: (token: string, tradeId: string) =>
     request<BuiltTx>(`/v1/repo/trades/${tradeId}/unwind`, token, { method: "POST" }),
 

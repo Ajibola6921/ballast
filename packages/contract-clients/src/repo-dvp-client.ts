@@ -26,6 +26,26 @@ export interface RepoProposeTerms {
   agreementHash: Buffer;
 }
 
+/** `RepoDvp::margin_view`: where a settled trade's margin stands, read without a transaction. */
+export interface OnChainRepoMargin {
+  exposure: bigint;
+  collateralValue: bigint;
+  ltvBps: number;
+  state: "Healthy" | "Warning" | "MarginCall" | "Liquidation";
+  /** False when the guarded price is not usable; the other fields are then zero. */
+  priceOk: boolean;
+}
+
+/** The parts of the on-chain `RepoTrade` the keeper reads. */
+export interface OnChainRepoTrade {
+  units: bigint;
+  status: "Proposed" | "Settled" | "Unwound" | "Defaulted";
+  pendingMarginCall: boolean;
+  marginCallAmount: bigint;
+  /** Unix seconds; unset while no call is open. */
+  cureDeadline?: bigint | number | null;
+}
+
 export class RepoDvpClient extends BaseContractClient {
   propose(source: string, terms: RepoProposeTerms): Promise<string> {
     return this.invoke(source, "propose", [
@@ -55,5 +75,20 @@ export class RepoDvpClient extends BaseContractClient {
 
   defaultClose(source: string, id: bigint): Promise<string> {
     return this.invoke(source, "default_close", [scAddress(source), scU64(id)]);
+  }
+
+  /** The cash borrower adds collateral to a settled trade; cures a margin call if it is enough. */
+  topUp(source: string, id: bigint, extraUnits: bigint): Promise<string> {
+    return this.invoke(source, "top_up", [scAddress(source), scU64(id), scI128(extraUnits)]);
+  }
+
+  /** Read-only margin snapshot; simulated, so it costs nothing and changes nothing. */
+  marginView(id: bigint): Promise<OnChainRepoMargin> {
+    return this.read<OnChainRepoMargin>("margin_view", [scU64(id)]);
+  }
+
+  /** Read-only: the trade as the contract holds it. */
+  trade(id: bigint): Promise<OnChainRepoTrade> {
+    return this.read<OnChainRepoTrade>("trade", [scU64(id)]);
   }
 }

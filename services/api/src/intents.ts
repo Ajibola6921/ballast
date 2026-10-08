@@ -4,7 +4,7 @@
  * when a route builds a transaction; `settleIntent` runs once the network has a final status for
  * it and applies that intent's effect to Postgres exactly once.
  */
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
 import { scaledToDecimalString } from "@ballast/domain-types";
 import { UNSIGNED_TX_TIMEOUT_S } from "@ballast/contract-clients";
@@ -24,7 +24,8 @@ export type IntentKind =
   | "exit.execute"
   | "repo.propose"
   | "repo.accept"
-  | "repo.unwind";
+  | "repo.unwind"
+  | "repo.top_up";
 
 export interface IntentArgs {
   xdr: string;
@@ -181,6 +182,23 @@ async function applySuccess(
         .set({ status: "unwound", leg2Tx: intent.txHash })
         .where(eq(schema.repoTrade.id, refId));
       return;
+
+    case "repo.top_up": {
+      // The contract decides whether the top-up was enough to cure; the books follow it.
+      const [trade] = await db.select().from(schema.repoTrade).where(eq(schema.repoTrade.id, refId)).limit(1);
+      const onChain = await contracts.repoDvp.trade(BigInt(trade.contractTradeId!));
+      await db
+        .update(schema.repoTrade)
+        .set({ units: scaledToDecimalString(BigInt(onChain.units)) })
+        .where(eq(schema.repoTrade.id, refId));
+      if (!onChain.pendingMarginCall) {
+        await db
+          .update(schema.repoMarginCall)
+          .set({ curedAt: new Date() })
+          .where(and(eq(schema.repoMarginCall.tradeId, refId), isNull(schema.repoMarginCall.curedAt)));
+      }
+      return;
+    }
   }
 }
 

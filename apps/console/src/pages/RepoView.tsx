@@ -23,6 +23,7 @@ export function RepoView() {
   const { session } = useAuth();
   const [assets, setAssets] = useState<AssetSummary[]>([]);
   const [trades, setTrades] = useState<RepoTradeRow[]>([]);
+  const [topUps, setTopUps] = useState<Record<string, string>>({});
   const [tx, setTx] = useState<BuiltTx | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -129,6 +130,24 @@ export function RepoView() {
                     >
                       Accept
                     </Button>
+                  )}
+                  {trade.status === "settled" && isBorrower && !matured && (
+                    <>
+                      <input
+                        value={topUps[trade.id] ?? ""}
+                        onChange={(e) => setTopUps((prev) => ({ ...prev, [trade.id]: e.target.value }))}
+                        placeholder="add units"
+                        inputMode="decimal"
+                        aria-label="Units of collateral to add"
+                        className="w-24 border border-line bg-bg px-2 py-1 text-xs outline-none focus:border-fg"
+                      />
+                      <Button
+                        disabled={busyId === trade.id || !topUps[trade.id]}
+                        onClick={() => build(trade.id, () => api.repoTopUp(session.token, trade.id, toScaled(topUps[trade.id])))}
+                      >
+                        Add collateral
+                      </Button>
+                    </>
                   )}
                   {trade.status === "settled" && matured && (
                     <Button

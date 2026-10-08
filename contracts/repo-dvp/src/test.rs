@@ -393,33 +393,174 @@ fn allowance_expiry_is_stable_across_neighbouring_ledgers() {
     assert!(first >= 1_000_003 + 720);
 }
 
-#[test]
-fn call_margin_and_default_close_gives_lender_the_collateral() {
-    let h = setup();
+/// Settles a 100-unit / 90-cash trade at $1 (95 collateral after the 5% haircut: LTV ~94.7%, in
+/// the MarginCall band) and returns its id. Interest is 0 at the moment of settlement.
+fn settled_under_margin(h: &Harness) -> u64 {
     let units = 100 * PRICE_SCALE;
-    // 95% collateral value (5% haircut) against 90 cash -> ~94.7% LTV -> MarginCall band.
     let cash_amount = 90 * PRICE_SCALE;
     let maturity = h.env.ledger().timestamp() + 30 * 24 * 3_600;
-    let id = propose(&h, units, cash_amount, 500, maturity);
-
-    MockTokenClient::new(&h.env, &h.rwa).mint(&h.cash_borrower, &units);
+    let id = propose(h, units, cash_amount, 500, maturity);
+    MockTokenClient::new(&h.env, &h.rwa).mint(&h.cash_borrower, &(units * 3));
     MockTokenClient::new(&h.env, &h.usdc).mint(&h.cash_lender, &cash_amount);
     RepoDvpClient::new(&h.env, &h.repo).accept_and_settle(&h.cash_borrower, &id);
+    id
+}
 
-    RepoDvpClient::new(&h.env, &h.repo).call_margin(&h.keeper, &id);
-    let trade = RepoDvpClient::new(&h.env, &h.repo).trade(&id);
+fn set_price(h: &Harness, value: i128) {
+    MockPriceGuardClient::new(&h.env, &h.price_guard).set_price(
+        &h.rwa,
+        &value,
+        &PriceStatus::Ok,
+        &h.env.ledger().timestamp(),
+    );
+}
+
+fn rwa_balance(h: &Harness, who: &Address) -> i128 {
+    MockTokenClient::new(&h.env, &h.rwa).balance(who)
+}
+
+#[test]
+fn default_close_gives_the_lender_only_what_covers_the_exposure() {
+    let h = setup();
+    let id = settled_under_margin(&h);
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+    let borrower_before = rwa_balance(&h, &h.cash_borrower);
+
+    repo.call_margin(&h.keeper, &id);
+    let trade = repo.trade(&id);
     assert!(trade.pending_margin_call);
     assert!(trade.margin_call_amount > 0);
     let deadline = trade.cure_deadline.expect("cure deadline should be set");
 
     h.env.ledger().set_timestamp(deadline);
-    RepoDvpClient::new(&h.env, &h.repo).default_close(&h.keeper, &id);
+    repo.default_close(&h.keeper, &id);
 
-    assert_eq!(
-        MockTokenClient::new(&h.env, &h.rwa).balance(&h.cash_lender),
-        units
+    // Exposure is the 90 of cash plus ~1 day of 5% interest; at $1 that many units go to the
+    // lender (rounded up) and the rest of the 100 pledged comes back to the borrower.
+    let lender_units = rwa_balance(&h, &h.cash_lender);
+    let borrower_back = rwa_balance(&h, &h.cash_borrower) - borrower_before;
+    assert!(lender_units >= 90 * PRICE_SCALE && lender_units < 91 * PRICE_SCALE, "lender got {lender_units}");
+    assert_eq!(lender_units + borrower_back, 100 * PRICE_SCALE);
+    assert_eq!(rwa_balance(&h, &h.repo), 0);
+    assert_eq!(repo.trade(&id).status, RepoStatus::Defaulted);
+}
+
+#[test]
+fn default_close_gives_the_lender_everything_when_the_collateral_is_worth_less_than_owed() {
+    let h = setup();
+    let id = settled_under_margin(&h);
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+    let borrower_before = rwa_balance(&h, &h.cash_borrower);
+
+    repo.call_margin(&h.keeper, &id);
+    let deadline = repo.trade(&id).cure_deadline.unwrap();
+    set_price(&h, 80 * PRICE_SCALE / 100); // 100 units are now worth 80 against 90+ owed
+    h.env.ledger().set_timestamp(deadline);
+    repo.default_close(&h.keeper, &id);
+
+    assert_eq!(rwa_balance(&h, &h.cash_lender), 100 * PRICE_SCALE);
+    assert_eq!(rwa_balance(&h, &h.cash_borrower), borrower_before);
+}
+
+#[test]
+fn a_price_recovery_cures_the_call_and_blocks_default() {
+    let h = setup();
+    let id = settled_under_margin(&h);
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+
+    repo.call_margin(&h.keeper, &id);
+    let deadline = repo.trade(&id).cure_deadline.unwrap();
+
+    set_price(&h, 2 * PRICE_SCALE);
+    h.env.ledger().set_timestamp(deadline);
+    let refused = panic::catch_unwind(AssertUnwindSafe(|| repo.default_close(&h.keeper, &id)));
+    assert!(refused.is_err(), "default must refuse once the position is healthy again");
+
+    repo.call_margin(&h.keeper, &id); // the keeper's next evaluation clears the call
+    let trade = repo.trade(&id);
+    assert!(!trade.pending_margin_call);
+    assert_eq!((trade.margin_call_amount, trade.cure_deadline), (0, None));
+}
+
+#[test]
+fn topping_up_cures_the_call_in_the_same_transaction() {
+    let h = setup();
+    let id = settled_under_margin(&h);
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+    repo.call_margin(&h.keeper, &id);
+    assert!(repo.trade(&id).pending_margin_call);
+
+    // 100 more units doubles the collateral: LTV ~47%, well clear of the margin-call band.
+    repo.top_up(&h.cash_borrower, &id, &(100 * PRICE_SCALE));
+
+    let trade = repo.trade(&id);
+    assert!(!trade.pending_margin_call);
+    assert_eq!(trade.units, 200 * PRICE_SCALE);
+    assert_eq!(rwa_balance(&h, &h.repo), 200 * PRICE_SCALE);
+}
+
+#[test]
+fn a_top_up_that_is_not_enough_adds_collateral_but_leaves_the_call_open() {
+    let h = setup();
+    let id = settled_under_margin(&h);
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+    repo.call_margin(&h.keeper, &id);
+
+    repo.top_up(&h.cash_borrower, &id, &(1 * PRICE_SCALE)); // 101 units: still ~93.6% LTV
+
+    let trade = repo.trade(&id);
+    assert!(trade.pending_margin_call);
+    assert_eq!(trade.units, 101 * PRICE_SCALE);
+}
+
+#[test]
+fn only_the_cash_borrower_can_top_up() {
+    let h = setup();
+    let id = settled_under_margin(&h);
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+    let result = panic::catch_unwind(AssertUnwindSafe(|| repo.top_up(&h.cash_lender, &id, &PRICE_SCALE)));
+    assert!(result.is_err());
+}
+
+#[test]
+fn calling_margin_again_does_not_move_the_cure_deadline() {
+    let h = setup();
+    let id = settled_under_margin(&h);
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+
+    repo.call_margin(&h.keeper, &id);
+    let first = repo.trade(&id).cure_deadline.unwrap();
+
+    h.env.ledger().set_timestamp(h.env.ledger().timestamp() + 3_600);
+    repo.call_margin(&h.keeper, &id);
+
+    assert_eq!(repo.trade(&id).cure_deadline.unwrap(), first, "a keeper must not extend the borrower's window");
+}
+
+#[test]
+fn default_before_the_cure_window_ends_is_refused() {
+    let h = setup();
+    let id = settled_under_margin(&h);
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+    repo.call_margin(&h.keeper, &id);
+    let result = panic::catch_unwind(AssertUnwindSafe(|| repo.default_close(&h.keeper, &id)));
+    assert!(result.is_err());
+}
+
+#[test]
+fn margin_view_reports_the_position_without_changing_it() {
+    let h = setup();
+    let id = settled_under_margin(&h);
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+
+    let view = repo.margin_view(&id);
+    assert!(view.price_ok);
+    assert_eq!(view.state, MarginState::MarginCall);
+    assert!(view.ltv_bps >= 8_000 && view.exposure >= 90 * PRICE_SCALE);
+    assert!(!repo.trade(&id).pending_margin_call, "reading must not open a call");
+
+    MockPriceGuardClient::new(&h.env, &h.price_guard).set_price(
+        &h.rwa, &PRICE_SCALE, &PriceStatus::Degraded, &h.env.ledger().timestamp(),
     );
-    assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&h.repo), 0);
-    let trade = RepoDvpClient::new(&h.env, &h.repo).trade(&id);
-    assert_eq!(trade.status, RepoStatus::Defaulted);
+    assert!(!repo.margin_view(&id).price_ok);
 }

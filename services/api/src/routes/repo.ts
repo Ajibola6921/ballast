@@ -5,7 +5,7 @@ import { scaledToDecimalString } from "@ballast/domain-types";
 import type { ChainGateway } from "../chain.js";
 import type { ContractClients } from "../contract-clients.js";
 import { recordIntent } from "../intents.js";
-import { repoProposalSchema, repoTradeActionSchema } from "../schemas.js";
+import { repoProposalSchema, repoTopUpSchema, repoTradeActionSchema } from "../schemas.js";
 import { requireAsset, requireStellarAccount } from "./helpers.js";
 
 export function registerRepoRoutes(app: FastifyInstance, db: Database, contracts: ContractClients, chain: ChainGateway): void {
@@ -96,6 +96,31 @@ export function registerRepoRoutes(app: FastifyInstance, db: Database, contracts
       kind: "repo.unwind",
       refId: trade.id,
       partyId: request.partyId,
+    });
+
+    return reply.code(201).send({ xdr, txHash, tradeId: trade.id });
+  });
+
+  // The cash borrower's way to cure a margin call: add collateral. If it is enough, the contract
+  // clears the call in the same transaction.
+  app.post<{ Params: { id: string } }>("/v1/repo/trades/:id/top-ups", async (request, reply) => {
+    const body = repoTopUpSchema.parse(request.body);
+    const [trade] = await db.select().from(schema.repoTrade).where(eq(schema.repoTrade.id, request.params.id)).limit(1);
+    if (!trade) return reply.code(404).send({ error: "repo trade not found" });
+    if (trade.cashBorrowerId !== request.partyId) {
+      return reply.code(403).send({ error: "only the cash borrower can add collateral to a repo" });
+    }
+    if (trade.status !== "settled") return reply.code(409).send({ error: `trade is ${trade.status}, not settled` });
+    if (!trade.contractTradeId) return reply.code(409).send({ error: "repo has not settled on-chain yet" });
+
+    const cashBorrowerAccount = await requireStellarAccount(db, trade.cashBorrowerId);
+    const xdr = await contracts.repoDvp.topUp(cashBorrowerAccount, BigInt(trade.contractTradeId), body.units);
+    const txHash = await recordIntent(db, chain, {
+      xdr,
+      kind: "repo.top_up",
+      refId: trade.id,
+      partyId: request.partyId,
+      payload: { units: body.units.toString() },
     });
 
     return reply.code(201).send({ xdr, txHash, tradeId: trade.id });

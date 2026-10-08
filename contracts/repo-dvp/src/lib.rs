@@ -59,7 +59,7 @@ use ballast_common::{
     access::{self, Roles},
     margin::{self, MarginState, MarginThresholds},
     pause::{self, PauseScope},
-    price::GuardedPrice,
+    price::{GuardedPrice, PRICE_SCALE},
     risk, timelock,
 };
 use soroban_sdk::{
@@ -141,6 +141,19 @@ pub struct RepoTrade {
     pub pending_margin_call: bool,
     pub margin_call_amount: i128,
     pub cure_deadline: Option<u64>,
+}
+
+/// A read-only margin snapshot of a settled trade, so a keeper can tell whether a transaction is
+/// needed before paying for one. `price_ok` is false when the guard's price cannot be used (and the
+/// other fields are then zero); a position is only judged on a price the guard stands behind.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RepoMarginView {
+    pub exposure: i128,
+    pub collateral_value: i128,
+    pub ltv_bps: u32,
+    pub state: MarginState,
+    pub price_ok: bool,
 }
 
 #[contracttype]
@@ -225,6 +238,40 @@ fn accrue_interest(cash_amount: i128, rate_bps: u32, elapsed_seconds: u64) -> i1
         .expect("repo-dvp: overflow accruing interest (term)")
         / SECONDS_PER_YEAR
         / BPS_DENOMINATOR
+}
+
+/// Clears an open margin call (the borrower cured it, by price recovery or by topping up).
+fn clear_margin_call(trade: &mut RepoTrade) {
+    trade.pending_margin_call = false;
+    trade.margin_call_amount = 0;
+    trade.cure_deadline = None;
+}
+
+/// Reads the guarded price and returns `(exposure, collateral_value, margin_state, price)` for a
+/// settled trade, or `None` when the price is not one the guard stands behind (`Degraded` or
+/// `Halted`). `exposure` is principal plus interest accrued so far; `collateral_value` has the
+/// asset's haircut applied.
+fn evaluate_margin(
+    env: &Env,
+    trade: &RepoTrade,
+    config: &RepoAssetConfig,
+) -> Option<(i128, i128, MarginState, i128)> {
+    let guarded = PriceGuardClient::new(env, &config.price_guard).guarded_price(&trade.asset);
+    if !guarded.is_usable_for_new_risk() {
+        return None;
+    }
+
+    let collateral_value = risk::collateral_value(trade.units, guarded.value, config.haircut_bps);
+    let now = env.ledger().timestamp();
+    let settled_at = trade.settled_at.unwrap_or(now);
+    let accrued = accrue_interest(trade.cash_amount, trade.rate_bps, now.saturating_sub(settled_at));
+    let exposure = trade
+        .cash_amount
+        .checked_add(accrued)
+        .expect("repo-dvp: overflow computing exposure");
+
+    let state = margin::classify(risk::ltv_bps(exposure, collateral_value), &config.thresholds);
+    Some((exposure, collateral_value, state, guarded.value))
 }
 
 #[contract]
@@ -465,10 +512,17 @@ impl RepoDvp {
             .publish((symbol_short!("unwind"), id), total_due);
     }
 
-    /// Cross-calls `PriceGuard` for the trade's asset and, if the current LTV of the pledged
-    /// collateral against outstanding exposure (principal + accrued interest) classifies as
-    /// `MarginCall` or worse, records the call and starts the cure clock. Does not notify anyone
-    /// off-chain — that is the `margin-monitor` service's job (PRD §6.5).
+    /// Cross-calls `PriceGuard` for the trade's asset and re-evaluates the margin on the pledged
+    /// collateral against the outstanding exposure (principal + accrued interest).
+    ///
+    /// - At `MarginCall` or worse it records a call and starts the cure clock. Calling it again
+    ///   while a call is open updates the amount owed but does **not** move the deadline, so the
+    ///   keeper can neither extend nor restart a borrower's cure window.
+    /// - If a call is open and the position is back under the margin-call threshold (the price
+    ///   recovered), it clears the call: the borrower has cured and `default_close` is no longer
+    ///   available.
+    ///
+    /// Does not notify anyone off-chain — that is the `margin-monitor` service's job (PRD §6.5).
     pub fn call_margin(env: Env, keeper: Address, id: u64) {
         access::require_keeper(&env);
         keeper.require_auth();
@@ -479,26 +533,10 @@ impl RepoDvp {
         }
 
         let config = read_asset_config(&env, &trade.asset);
-        let guarded = PriceGuardClient::new(&env, &config.price_guard).guarded_price(&trade.asset);
-        if !guarded.is_usable_for_new_risk() {
-            panic!("repo-dvp: price is not Ok, cannot evaluate margin");
-        }
-
-        let collateral_value =
-            risk::collateral_value(trade.units, guarded.value, config.haircut_bps);
+        let (exposure, collateral_value, state, _price) = evaluate_margin(&env, &trade, &config)
+            .expect("repo-dvp: price is not Ok, cannot evaluate margin");
 
         let now = env.ledger().timestamp();
-        let settled_at = trade.settled_at.unwrap_or(now);
-        let elapsed = now.saturating_sub(settled_at);
-        let accrued = accrue_interest(trade.cash_amount, trade.rate_bps, elapsed);
-        let exposure = trade
-            .cash_amount
-            .checked_add(accrued)
-            .expect("repo-dvp: overflow computing exposure");
-
-        let ltv = risk::ltv_bps(exposure, collateral_value);
-        let state = margin::classify(ltv, &config.thresholds);
-
         if matches!(state, MarginState::MarginCall | MarginState::Liquidation) {
             // The collateral value needed to bring the LTV back down to exactly the
             // margin-call threshold, minus what's actually there. This is guaranteed
@@ -509,18 +547,77 @@ impl RepoDvp {
                 .checked_mul(BPS_DENOMINATOR)
                 .expect("repo-dvp: overflow computing margin target")
                 / config.thresholds.margin_call_bps as i128;
-            trade.pending_margin_call = true;
             trade.margin_call_amount = (target_collateral - collateral_value).max(0);
-            trade.cure_deadline = Some(now + MARGIN_CURE_GRACE_SECONDS);
+            if !trade.pending_margin_call {
+                trade.pending_margin_call = true;
+                trade.cure_deadline = Some(now + MARGIN_CURE_GRACE_SECONDS);
+            }
             write_trade(&env, &trade);
             env.events()
                 .publish((symbol_short!("mcall"), id), trade.margin_call_amount);
+        } else if trade.pending_margin_call {
+            clear_margin_call(&mut trade);
+            write_trade(&env, &trade);
+            env.events().publish((symbol_short!("cured"), id), 0i128);
         }
     }
 
+    /// The cash borrower adds collateral to a settled trade, which is how a margin call is cured
+    /// by the borrower. The RWA moves into this contract's escrow and counts toward the trade
+    /// immediately; if the position is then back under the margin-call threshold the call is
+    /// cleared in the same transaction.
+    pub fn top_up(env: Env, cash_borrower: Address, id: u64, extra_units: i128) {
+        // Deliberately not pause-gated: adding collateral only reduces risk, and a borrower must
+        // be able to cure a call even while the contract is paused.
+        cash_borrower.require_auth();
+        assert!(extra_units > 0, "repo-dvp: top-up must be positive");
+
+        let mut trade = read_trade(&env, id);
+        if trade.status != RepoStatus::Settled {
+            panic!("repo-dvp: trade is not settled");
+        }
+        assert_eq!(
+            trade.cash_borrower, cash_borrower,
+            "repo-dvp: only the cash borrower can top up"
+        );
+
+        token::Client::new(&env, &trade.asset).transfer(
+            &cash_borrower,
+            to_muxed(&env.current_contract_address()),
+            &extra_units,
+        );
+        trade.units = trade
+            .units
+            .checked_add(extra_units)
+            .expect("repo-dvp: overflow adding collateral");
+
+        let mut cured = false;
+        if trade.pending_margin_call {
+            let config = read_asset_config(&env, &trade.asset);
+            // Without a usable price the call stays open: the keeper clears it on its next
+            // evaluation. Never clear a call on a price the guard does not stand behind.
+            if let Some((_, _, state, _)) = evaluate_margin(&env, &trade, &config) {
+                if !matches!(state, MarginState::MarginCall | MarginState::Liquidation) {
+                    clear_margin_call(&mut trade);
+                    cured = true;
+                }
+            }
+        }
+        write_trade(&env, &trade);
+        env.events()
+            .publish((symbol_short!("topup"), id), (extra_units, cured));
+    }
+
     /// If the cash borrower has not cured an outstanding margin call by `cure_deadline`, the cash
-    /// lender takes title to the pledged RWA and the trade closes. See the module docs for exactly
-    /// what bookkeeping this does and does not do.
+    /// lender takes title to as much of the pledged RWA as covers what is owed and the trade
+    /// closes. See the module docs for exactly what bookkeeping this does and does not do.
+    ///
+    /// The position is re-evaluated at default time: if the price has recovered since the call, the
+    /// borrower has cured and this refuses (the keeper's `call_margin` then clears the call). The
+    /// collateral is valued at the guarded price with no haircut; the lender receives
+    /// `ceil(exposure / price)` units, capped at what is pledged, and any units above that go back
+    /// to the borrower. If the collateral is worth less than the exposure the lender takes all of
+    /// it and bears the shortfall.
     pub fn default_close(env: Env, keeper: Address, id: u64) {
         access::require_keeper(&env);
         keeper.require_auth();
@@ -539,20 +636,66 @@ impl RepoDvp {
             panic!("repo-dvp: cure window has not expired yet");
         }
 
-        // Simplified fail-path outcome (PRD §5 Phase 3 "Fail path"): lender keeps the collateral,
-        // trade closed. See module docs for what this deliberately does not settle.
+        let config = read_asset_config(&env, &trade.asset);
+        let (exposure, _collateral_value, state, price) = evaluate_margin(&env, &trade, &config)
+            .expect("repo-dvp: price is not Ok, cannot default");
+        if !matches!(state, MarginState::MarginCall | MarginState::Liquidation) {
+            panic!("repo-dvp: margin call has been cured");
+        }
+
+        assert!(price > 0, "repo-dvp: guarded price is not positive");
+        // Units worth `exposure` at the guarded price, rounded up so the lender is never short by
+        // rounding; ceil(a / b) = (a + b - 1) / b.
+        let owed_units = exposure
+            .checked_mul(PRICE_SCALE)
+            .expect("repo-dvp: overflow valuing the exposure")
+            .checked_add(price - 1)
+            .expect("repo-dvp: overflow valuing the exposure")
+            / price;
+        let lender_units = owed_units.min(trade.units);
+        let borrower_units = trade.units - lender_units;
+
         let asset_client = token::Client::new(&env, &trade.asset);
         asset_client.transfer(
             &env.current_contract_address(),
             to_muxed(&trade.cash_lender),
-            &trade.units,
+            &lender_units,
         );
+        if borrower_units > 0 {
+            asset_client.transfer(
+                &env.current_contract_address(),
+                to_muxed(&trade.cash_borrower),
+                &borrower_units,
+            );
+        }
 
         trade.status = RepoStatus::Defaulted;
         write_trade(&env, &trade);
 
         env.events()
-            .publish((symbol_short!("default"), id), trade.units);
+            .publish((symbol_short!("default"), id), (lender_units, borrower_units));
+    }
+
+    /// Pure read: where the trade's margin stands right now. Changes nothing.
+    pub fn margin_view(env: Env, id: u64) -> RepoMarginView {
+        let trade = read_trade(&env, id);
+        let config = read_asset_config(&env, &trade.asset);
+        match evaluate_margin(&env, &trade, &config) {
+            Some((exposure, collateral_value, state, _)) => RepoMarginView {
+                exposure,
+                collateral_value,
+                ltv_bps: risk::ltv_bps(exposure, collateral_value),
+                state,
+                price_ok: true,
+            },
+            None => RepoMarginView {
+                exposure: 0,
+                collateral_value: 0,
+                ltv_bps: 0,
+                state: MarginState::Healthy,
+                price_ok: false,
+            },
+        }
     }
 
     pub fn trade(env: Env, id: u64) -> RepoTrade {
