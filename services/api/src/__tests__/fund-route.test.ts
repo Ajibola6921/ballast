@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import jwt from "jsonwebtoken";
+import { signSessionToken } from "../session-token.js";
 import { schema } from "@ballast/db";
 import type { ApiConfig } from "../config.js";
 import type { ChainGateway } from "../chain.js";
@@ -27,7 +27,7 @@ const LINE_ID = "55555555-5555-5555-5555-555555555555";
 const chain = { txHash: () => "fund-tx-hash" } as unknown as ChainGateway;
 
 function tokenFor(stellarAccount: string) {
-  return jwt.sign({ sub: stellarAccount }, config.jwtSigningSecret);
+  return signSessionToken(stellarAccount, config.jwtSigningSecret);
 }
 
 describe("POST /v1/credit-lines/:id/fund", () => {

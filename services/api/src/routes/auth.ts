@@ -16,7 +16,7 @@
  * transaction plus this service's config.
  */
 import type { FastifyInstance } from "fastify";
-import jwt from "jsonwebtoken";
+import { signSessionToken } from "../session-token.js";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { Keypair, StrKey, WebAuth } from "@stellar/stellar-sdk";
@@ -113,7 +113,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Database, config: A
       return reply.code(404).send({ error: "stellar account not linked to a known party" });
     }
 
-    const token = jwt.sign({ sub: clientAccountID }, config.jwtSigningSecret, { expiresIn: "12h" });
+    const token = signSessionToken(clientAccountID, config.jwtSigningSecret);
     return { token, partyId: account.partyId };
   });
 }

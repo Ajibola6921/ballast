@@ -8,11 +8,11 @@
  * production (there is no proof of key ownership here at all).
  */
 import type { FastifyInstance } from "fastify";
-import jwt from "jsonwebtoken";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { schema, type Database } from "@ballast/db";
 import type { ApiConfig } from "../config.js";
+import { signSessionToken } from "../session-token.js";
 
 const devLoginSchema = z.object({ stellarAccount: z.string().min(1) });
 
@@ -29,7 +29,7 @@ export function registerDevAuthRoutes(app: FastifyInstance, db: Database, config
       return reply.code(404).send({ error: "stellar account not linked to a known party" });
     }
 
-    const token = jwt.sign({ sub: body.stellarAccount }, config.jwtSigningSecret, { expiresIn: "12h" });
+    const token = signSessionToken(body.stellarAccount, config.jwtSigningSecret);
     return { token, partyId: account.partyId };
   });
 }

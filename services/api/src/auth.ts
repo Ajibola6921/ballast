@@ -1,9 +1,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import jwt from "jsonwebtoken";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
 import type { ApiConfig } from "./config.js";
+import { verifySessionToken } from "./session-token.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -82,17 +82,11 @@ export function buildAuthHook(config: ApiConfig, db: Database) {
 
     if (authHeader?.startsWith("Bearer ")) {
       const token = authHeader.slice("Bearer ".length);
-      let payload: jwt.JwtPayload;
+      let stellarAccount: string;
       try {
-        const decoded = jwt.verify(token, config.jwtSigningSecret);
-        if (typeof decoded === "string") throw new Error("unexpected string payload");
-        payload = decoded;
+        stellarAccount = verifySessionToken(token, config.jwtSigningSecret);
       } catch {
         return reply.code(401).send({ error: "invalid or expired token" });
-      }
-      const stellarAccount = payload.sub;
-      if (!stellarAccount) {
-        return reply.code(401).send({ error: "token missing sub claim" });
       }
       const [account] = await db
         .select()

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import jwt from "jsonwebtoken";
+import { signSessionToken } from "../session-token.js";
 import type { ApiConfig } from "../config.js";
 import type { ContractClients } from "../contract-clients.js";
 import { buildServer } from "../server.js";
@@ -46,7 +46,7 @@ describe("auth hook", () => {
 
   it("rejects a JWT signed with the wrong secret", async () => {
     const app = testServer();
-    const token = jwt.sign({ sub: "GBOGUSACCOUNT" }, "wrong-secret");
+    const token = signSessionToken("GBOGUSACCOUNT", "wrong-secret");
     const res = await app.inject({
       method: "GET",
       url: "/v1/positions?party=00000000-0000-0000-0000-000000000000",

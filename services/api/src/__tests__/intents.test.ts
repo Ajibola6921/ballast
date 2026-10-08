@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import jwt from "jsonwebtoken";
+import { signSessionToken } from "../session-token.js";
 import { schema, type Database } from "@ballast/db";
 import type { ChainGateway } from "../chain.js";
 import type { ApiConfig } from "../config.js";
@@ -216,7 +216,7 @@ describe("POST /v1/tx/submit", () => {
     consoleOrigin: "http://localhost:5173",
   };
   const ACCOUNT = "GCALLERACCOUNT";
-  const headers = { authorization: `Bearer ${jwt.sign({ sub: ACCOUNT }, config.jwtSigningSecret)}` };
+  const headers = { authorization: `Bearer ${signSessionToken(ACCOUNT, config.jwtSigningSecret)}` };
   const account: [unknown, unknown[]] = [schema.partyAccount, [{ partyId: "party-1", stellarAccount: ACCOUNT }]];
 
   it("refuses to relay a transaction this API never built", async () => {

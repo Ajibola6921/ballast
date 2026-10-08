@@ -64,6 +64,11 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   // unless explicitly opted into, and never the default even in local dev, so it can't be reached
   // by accident.
   if (process.env.ENABLE_DEV_LOGIN === "true") {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "services/api: ENABLE_DEV_LOGIN=true with NODE_ENV=production — dev-login has no proof of key ownership and must never run in production",
+      );
+    }
     app.log.warn(
       "services/api: ENABLE_DEV_LOGIN=true — /v1/auth/dev-login is active (no proof of Stellar key ownership). Never set this in production.",
     );
