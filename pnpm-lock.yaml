@@ -156,6 +156,9 @@ importers:
       '@aws-sdk/client-kms':
         specifier: ^3.700.0
         version: 3.1134.0
+      '@ballast/network-config':
+        specifier: workspace:*
+        version: link:../network-config
       '@stellar/stellar-sdk':
         specifier: ^17.2.1
         version: 17.2.1
@@ -270,6 +273,9 @@ importers:
       '@ballast/domain-types':
         specifier: workspace:*
         version: link:../../packages/domain-types
+      '@ballast/network-config':
+        specifier: workspace:*
+        version: link:../../packages/network-config
       '@ballast/observability':
         specifier: workspace:*
         version: link:../../packages/observability
@@ -415,9 +421,15 @@ importers:
       '@stellar/stellar-sdk':
         specifier: ^17.2.1
         version: 17.2.1
+      drizzle-orm:
+        specifier: ^0.36.0
+        version: 0.36.4(@types/react@18.3.31)(postgres@3.4.9)(react@18.3.1)
       fastify:
         specifier: ^5.1.0
         version: 5.12.5
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^22.9.0

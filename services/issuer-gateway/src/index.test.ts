@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./index.js";
 
+const TOKEN = "gateway-test-token-0123456789abcdef0123456789";
+const AUTH = { "x-internal-token": TOKEN };
+
 /** Minimal fake of the slice of `Database` the server touches: `db.insert(...).values(...)`. */
 function fakeDb() {
   const auditRows: Array<{ actor: string; action: string; payload: Record<string, unknown> }> = [];
@@ -54,11 +57,12 @@ afterEach(() => {
 describe("issuer-gateway internal endpoints", () => {
   it("POST /internal/issuers/spiko/authorize", async () => {
     const { db, auditRows } = fakeDb();
-    const app = buildServer(db);
+    const app = buildServer(db, TOKEN);
 
     const res = await app.inject({
       method: "POST",
       url: "/internal/issuers/spiko/authorize",
+      headers: AUTH,
       payload: { assetCode: "EUTBL", holderAddress: "GHOLDER" },
     });
 
@@ -71,11 +75,12 @@ describe("issuer-gateway internal endpoints", () => {
 
   it("POST /internal/issuers/etherfuse/sep8-approve", async () => {
     const { db, auditRows } = fakeDb();
-    const app = buildServer(db);
+    const app = buildServer(db, TOKEN);
 
     const res = await app.inject({
       method: "POST",
       url: "/internal/issuers/etherfuse/sep8-approve",
+      headers: AUTH,
       payload: { assetCode: "CETES", txXdr: "AAAA" },
     });
 
@@ -86,11 +91,12 @@ describe("issuer-gateway internal endpoints", () => {
 
   it("POST /internal/issuers/franklin/lien-freeze", async () => {
     const { db, auditRows } = fakeDb();
-    const app = buildServer(db);
+    const app = buildServer(db, TOKEN);
 
     const res = await app.inject({
       method: "POST",
       url: "/internal/issuers/franklin/lien-freeze",
+      headers: AUTH,
       payload: { assetCode: "BENJI", holderAddress: "GHOLDER", units: "1000000" },
     });
 
@@ -101,11 +107,12 @@ describe("issuer-gateway internal endpoints", () => {
 
   it("POST /internal/issuers/spiko/lien-release", async () => {
     const { db, auditRows } = fakeDb();
-    const app = buildServer(db);
+    const app = buildServer(db, TOKEN);
 
     const res = await app.inject({
       method: "POST",
       url: "/internal/issuers/spiko/lien-release",
+      headers: AUTH,
       payload: { assetCode: "EUTBL", lienRef: "spiko-lien-abc123" },
     });
 
@@ -116,11 +123,12 @@ describe("issuer-gateway internal endpoints", () => {
 
   it("POST /internal/issuers/etherfuse/redeem", async () => {
     const { db, auditRows } = fakeDb();
-    const app = buildServer(db);
+    const app = buildServer(db, TOKEN);
 
     const res = await app.inject({
       method: "POST",
       url: "/internal/issuers/etherfuse/redeem",
+      headers: AUTH,
       payload: { assetCode: "CETES", units: "500000", destination: "GDEST" },
     });
 
@@ -134,11 +142,12 @@ describe("issuer-gateway internal endpoints", () => {
   it("returns an error, not an approval, for an issuer whose back-office is not configured", async () => {
     vi.stubEnv("SPIKO_API_BASE_URL", "");
     const { db } = fakeDb();
-    const app = buildServer(db);
+    const app = buildServer(db, TOKEN);
 
     const res = await app.inject({
       method: "POST",
       url: "/internal/issuers/spiko/authorize",
+      headers: AUTH,
       payload: { assetCode: "EUTBL", holderAddress: "GHOLDER" },
     });
 
@@ -147,14 +156,31 @@ describe("issuer-gateway internal endpoints", () => {
 
   it("rejects an unknown issuer code with a clear error rather than a silent default", async () => {
     const { db } = fakeDb();
-    const app = buildServer(db);
+    const app = buildServer(db, TOKEN);
 
     const res = await app.inject({
       method: "POST",
       url: "/internal/issuers/unknown-issuer/authorize",
+      headers: AUTH,
       payload: { assetCode: "X", holderAddress: "GHOLDER" },
     });
 
     expect(res.statusCode).toBe(500);
+  });
+
+  it("refuses every endpoint without the internal token, before touching an issuer", async () => {
+    const { db, auditRows } = fakeDb();
+    const app = buildServer(db, TOKEN);
+
+    for (const headers of [{}, { "x-internal-token": "wrong-token" }]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/internal/issuers/spiko/redeem",
+        headers,
+        payload: { assetCode: "EUTBL", units: "1", destination: "GDEST" },
+      });
+      expect(res.statusCode).toBe(401);
+    }
+    expect(auditRows).toHaveLength(0);
   });
 });

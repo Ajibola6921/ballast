@@ -15,6 +15,7 @@
   "dependencies": {
     "@ballast/db": "workspace:*",
     "@ballast/domain-types": "workspace:*",
+    "@ballast/network-config": "workspace:*",
     "@ballast/observability": "workspace:*",
     "fastify": "^5.1.0"
   },

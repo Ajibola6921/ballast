@@ -57,6 +57,13 @@
       "when": 1791477325125,
       "tag": "0007_compliance_check",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791488618339,
+      "tag": "0008_payout_forward",
+      "breakpoints": true
     }
   ]
 }

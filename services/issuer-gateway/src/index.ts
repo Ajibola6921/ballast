@@ -3,12 +3,14 @@
  * issuer's `IssuerAdapter` via `getAdapter` and calls the matching method, then writes an
  * `audit_log` row for the call (every issuer interaction is a compliance-relevant event).
  *
- * These are internal-only endpoints — no public auth is applied here. Callers (e.g.
- * `services/api`'s pledge/exit/liquidation handlers, or `services/keeper`) are expected to reach
- * this service over a private network / service mesh, not the public internet.
+ * These are internal-only endpoints, and they ask issuers to place liens and redeem tokens, so
+ * every request must carry the shared `x-internal-token` and the server listens on loopback unless
+ * told otherwise. Callers (e.g. `services/api`'s pledge/exit/liquidation handlers, or
+ * `services/keeper`) reach it over a private network, not the public internet.
  */
 import Fastify, { type FastifyInstance } from "fastify";
 import { createDatabase, schema, type Database } from "@ballast/db";
+import { internalBindHost, loadInternalToken, requireInternalToken } from "@ballast/network-config";
 import { createLogger } from "@ballast/observability";
 import { getAdapter } from "./registry.js";
 
@@ -47,8 +49,9 @@ async function audit(db: Database, action: string, payload: Record<string, unkno
   });
 }
 
-export function buildServer(db: Database): FastifyInstance {
+export function buildServer(db: Database, internalToken: string): FastifyInstance {
   const app = Fastify({ logger: false });
+  requireInternalToken(app, internalToken);
 
   app.post<{ Params: { code: string }; Body: AuthorizeBody }>(
     "/internal/issuers/:code/authorize",
@@ -115,12 +118,14 @@ export function buildServer(db: Database): FastifyInstance {
 
 async function main() {
   const logger = createLogger("issuer-gateway");
+  const internalToken = loadInternalToken();
   const db = createDatabase();
-  const app = buildServer(db);
+  const app = buildServer(db, internalToken);
   const port = Number(process.env.ISSUER_GATEWAY_PORT ?? 3001);
+  const host = internalBindHost("issuer-gateway");
 
-  await app.listen({ port, host: "0.0.0.0" });
-  logger.info({ port }, "issuer-gateway: listening");
+  await app.listen({ port, host });
+  logger.info({ port, host }, "issuer-gateway: listening");
 }
 
 if (process.env.VITEST !== "true") {

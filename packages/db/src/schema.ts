@@ -376,6 +376,22 @@ export const complianceCheck = pgTable(
   (t) => [index("compliance_check_party_idx").on(t.partyId, t.checkedAt)],
 );
 
+// --- Payout hop ---
+
+/** One row per first-leg transaction the payout hop has been asked to forward, claimed before any
+ * money moves. The primary key is what makes a replayed or duplicated request unable to pay twice. */
+export const payoutForward = pgTable("payout_forward", {
+  fromTxHash: text("from_tx_hash").primaryKey(),
+  toAccount: text("to_account").notNull(),
+  amount: money("amount").notNull(),
+  memo: text("memo").notNull(),
+  /** `claimed` while in flight, `sent` once the network accepted it, `failed` if it did not (a
+   * failed forward may be retried). */
+  status: text("status").notNull().default("claimed"),
+  txHash: text("tx_hash"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // --- Institution API keys ---
 
 /** A party's API credential for the signed-request auth path. `keyId` is the public half sent in

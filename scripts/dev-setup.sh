@@ -108,6 +108,7 @@ PAYOUT_HOP_PORT=$(keep PAYOUT_HOP_PORT 3002)
 JWT_SIGNING_SECRET=$(keep JWT_SIGNING_SECRET "$(openssl rand -hex 32)")
 WEBHOOK_SECRET_KEY=$(keep WEBHOOK_SECRET_KEY "$(openssl rand -hex 32)")
 API_KEY_SECRET_KEY=$(keep API_KEY_SECRET_KEY "$(openssl rand -hex 32)")
+INTERNAL_API_TOKEN=$(keep INTERNAL_API_TOKEN "$(openssl rand -hex 32)")
 
 # Real price sources for the test asset (see scripts/real-sources.env).
 # shellcheck source=/dev/null
@@ -147,6 +148,12 @@ PAYOUT_HOP_PORT=$PAYOUT_HOP_PORT
 JWT_SIGNING_SECRET=$JWT_SIGNING_SECRET
 WEBHOOK_SECRET_KEY=$WEBHOOK_SECRET_KEY
 API_KEY_SECRET_KEY=$API_KEY_SECRET_KEY
+INTERNAL_API_TOKEN=$INTERNAL_API_TOKEN
+# payout-hop may pay only these accounts, in this USDC, up to the cap. In dev the "anchors" are the
+# test lender and borrower.
+PAYOUT_HOP_USDC_ISSUER=$USDC_ISSUER
+PAYOUT_HOP_ALLOWED_DESTINATIONS=$LENDER,$BORROWER
+PAYOUT_HOP_MAX_AMOUNT=5000
 SEP10_SERVER_SECRET=$(stellar keys secret ballast_sep10)
 SEP10_HOME_DOMAIN=localhost
 SEP10_WEB_AUTH_DOMAIN=localhost

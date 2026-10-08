@@ -3,42 +3,72 @@
  * `POST /internal/payout-hop/forward`, the endpoint `services/api`'s exit-execute handler (RWA ->
  * USDC, PRD §5 Phase 2 "Settlement") or credit-line-draw handler would call once the first leg
  * (Ballast contract -> operator G-account) has landed on-chain, to push funds the rest of the way
- * to an anchor with the memo it needs. Wiring that caller is `services/api`'s job, not this
- * service's — this endpoint only needs to be clean and well-documented for them to call.
+ * to an anchor with the memo it needs.
+ *
+ * This endpoint moves the operator's own USDC, so it is locked down three ways: every request must
+ * carry the shared `x-internal-token`, the server listens on loopback unless told otherwise, and
+ * what a request may ask for is bounded by the operator's `PayoutPolicy` (approved destinations,
+ * the configured USDC, a per-payout cap), with each first-leg transaction payable once.
  */
 import Fastify, { type FastifyInstance } from "fastify";
+import { z } from "zod";
 import { createDatabase, type Database } from "@ballast/db";
-import { loadNetworkConfig } from "@ballast/network-config";
+import {
+  internalBindHost,
+  loadInternalToken,
+  loadNetworkConfig,
+  requireInternalToken,
+} from "@ballast/network-config";
 import { createLogger } from "@ballast/observability";
-import { forwardPayout } from "./hop.js";
+import {
+  DuplicatePayoutError,
+  PayoutRefusedError,
+  forwardPayout,
+  loadPayoutPolicy,
+  type PayoutPolicy,
+} from "./hop.js";
 import { OperatorPayoutSigner, type PayoutSigner } from "./signer.js";
 
-interface ForwardPayoutRequestBody {
-  fromContractPayoutTxHash: string;
-  toAnchorAccount: string;
-  /** Decimal string over the wire — bigints don't survive JSON. */
-  amount: string;
-  memo: string;
-  usdcAssetAddress: string;
-  quoteId?: string;
-}
+const forwardBody = z.object({
+  fromContractPayoutTxHash: z.string().min(1),
+  toAnchorAccount: z.string().min(1),
+  /** Decimal digits over the wire — bigints don't survive JSON. */
+  amount: z.string().regex(/^[0-9]+$/, "amount must be a whole number of stroops"),
+  memo: z.string().min(1).max(64),
+  usdcAssetAddress: z.string().min(1),
+  quoteId: z.string().uuid().optional(),
+});
 
-export function buildServer(db: Database, signer: PayoutSigner): FastifyInstance {
+export function buildServer(
+  db: Database,
+  signer: PayoutSigner,
+  options: { internalToken: string; policy: PayoutPolicy },
+): FastifyInstance {
   const app = Fastify({ logger: false });
+  requireInternalToken(app, options.internalToken);
 
-  app.post<{ Body: ForwardPayoutRequestBody }>("/internal/payout-hop/forward", async (req, reply) => {
-    const body = req.body;
+  app.post("/internal/payout-hop/forward", async (req, reply) => {
+    const parsed = forwardBody.safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => i.message).join("; ") });
+    const body = parsed.data;
     try {
-      const result = await forwardPayout(db, signer, {
-        fromContractPayoutTxHash: body.fromContractPayoutTxHash,
-        toAnchorAccount: body.toAnchorAccount,
-        amount: BigInt(body.amount),
-        memo: body.memo,
-        usdcAssetAddress: body.usdcAssetAddress,
-        quoteId: body.quoteId,
-      });
+      const result = await forwardPayout(
+        db,
+        signer,
+        {
+          fromContractPayoutTxHash: body.fromContractPayoutTxHash,
+          toAnchorAccount: body.toAnchorAccount,
+          amount: BigInt(body.amount),
+          memo: body.memo,
+          usdcAssetAddress: body.usdcAssetAddress,
+          quoteId: body.quoteId,
+        },
+        options.policy,
+      );
       return reply.send(result);
     } catch (err) {
+      if (err instanceof PayoutRefusedError) return reply.status(403).send({ error: err.message });
+      if (err instanceof DuplicatePayoutError) return reply.status(409).send({ error: err.message });
       req.log.error({ err }, "payout-hop: forward failed");
       return reply.status(502).send({ error: err instanceof Error ? err.message : "unknown error" });
     }
@@ -49,15 +79,18 @@ export function buildServer(db: Database, signer: PayoutSigner): FastifyInstance
 
 async function main() {
   const logger = createLogger("payout-hop");
+  const internalToken = loadInternalToken();
+  const policy = loadPayoutPolicy();
   const db = createDatabase();
   const network = loadNetworkConfig();
   const signer = await OperatorPayoutSigner.create(logger, network.rpcUrl, network.networkPassphrase);
 
-  const app = buildServer(db, signer);
+  const app = buildServer(db, signer, { internalToken, policy });
   const port = Number(process.env.PAYOUT_HOP_PORT ?? 3002);
+  const host = internalBindHost("payout-hop");
 
-  await app.listen({ port, host: "0.0.0.0" });
-  logger.info({ port, operator: signer.publicKey() }, "payout-hop: listening");
+  await app.listen({ port, host });
+  logger.info({ port, host, operator: signer.publicKey(), destinations: policy.allowedDestinations.size }, "payout-hop: listening");
 }
 
 if (process.env.VITEST !== "true") {
