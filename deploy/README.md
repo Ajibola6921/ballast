@@ -28,6 +28,12 @@ Add `--profile lending` for the keeper, margin monitor and ledger once the lendi
 4. **DNS** for `API_DOMAIN` and `CONSOLE_DOMAIN` must point at this host and ports 80/443 must be open
    before Caddy starts, or certificate issuance fails.
 
+## Verified so far
+
+The service image builds (`docker build --target service .`) and starts: with the production secrets
+missing it exits at once with the list of what is missing, rather than booting insecurely. The full
+compose stack, TLS issuance and the console image have not been run end to end.
+
 ## What is and is not covered
 
 - Postgres data lives in the `pgdata` volume. Back it up; nothing here does.
