@@ -18,6 +18,15 @@ export interface NetworkConfig {
   contracts: ContractIds;
 }
 
+const NETWORK_NAMES: readonly StellarNetworkName[] = ["local", "testnet", "mainnet"];
+
+/** Passphrases that identify the public networks. A service signs transactions for whichever
+ * passphrase it is given, so a name that disagrees with it is refused rather than trusted. */
+const PUBLIC_PASSPHRASES: Record<"testnet" | "mainnet", string> = {
+  testnet: "Test SDF Network ; September 2015",
+  mainnet: "Public Global Stellar Network ; September 2015",
+};
+
 const REQUIRED = ["STELLAR_RPC_URL", "STELLAR_HORIZON_URL", "STELLAR_NETWORK_PASSPHRASE"] as const;
 
 /**
@@ -32,7 +41,20 @@ export function loadNetworkConfig(env: NodeJS.ProcessEnv = process.env): Network
     throw new Error(`network-config: missing required env vars: ${missing.join(", ")}`);
   }
 
-  const network = (env.STELLAR_NETWORK as StellarNetworkName) ?? "local";
+  const network = (env.STELLAR_NETWORK || "local") as StellarNetworkName;
+  if (!NETWORK_NAMES.includes(network)) {
+    throw new Error(`network-config: STELLAR_NETWORK "${network}" is not one of ${NETWORK_NAMES.join(", ")}`);
+  }
+  const passphrase = env.STELLAR_NETWORK_PASSPHRASE!;
+  if (network === "testnet" || network === "mainnet") {
+    if (passphrase !== PUBLIC_PASSPHRASES[network]) {
+      throw new Error(
+        `network-config: STELLAR_NETWORK=${network} but STELLAR_NETWORK_PASSPHRASE is "${passphrase}" (${network} uses "${PUBLIC_PASSPHRASES[network]}")`,
+      );
+    }
+  } else if (Object.values(PUBLIC_PASSPHRASES).includes(passphrase)) {
+    throw new Error(`network-config: STELLAR_NETWORK=local but STELLAR_NETWORK_PASSPHRASE is a public network's ("${passphrase}")`);
+  }
 
   return {
     network,

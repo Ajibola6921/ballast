@@ -26,6 +26,7 @@ const redstoneCetes = fixture("redstone-cetes-feed.json");
 const TEST_ENV = {
   STELLAR_RPC_URL: "https://rpc.example",
   STELLAR_HORIZON_URL: "https://horizon.example",
+  STELLAR_NETWORK: "mainnet",
   STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
   REDSTONE_FEED_CONTRACT_IDS: JSON.stringify({ CETES: redstoneCetes.contractId }),
 } as NodeJS.ProcessEnv;

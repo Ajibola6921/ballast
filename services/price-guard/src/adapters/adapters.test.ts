@@ -80,6 +80,7 @@ describe("RedstoneAdapter", () => {
     const env = {
       STELLAR_RPC_URL: "https://rpc.example",
       STELLAR_HORIZON_URL: "https://horizon.example",
+      STELLAR_NETWORK: "mainnet",
       STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
     } as NodeJS.ProcessEnv;
 
