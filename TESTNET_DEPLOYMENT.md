@@ -33,11 +33,31 @@ Test assets registered against this deployment (issued fresh for this deploy, no
 | `RWA1` | `GAFHGGKP5657WCBVQBCF3F2S3O2TGICCTE53O7FPEIGCPTHCXXHUPCET` | `CA6ITP5KB7QHPFTOA72QE3YZB7AZB3SFK5NNCUWL5TVVX45O7XFN65HE` |
 | `TUSD` | `GD4KBWX6TID4MATRWOFLQXGSVHOHE5IJ47LFMXA3JXHADO6TWGYICDRR` | `CAEYEZD7F2RFLWJFBXIY75RGEWHKFCKFKT2CJHHACSMUMBH3LG777DJT` |
 
-`price-guard`'s issuer-signature requirement (`require_nav_signature`) was left **disabled** for
-this deploy via `configure_signature_requirement` — no real issuer Ed25519 key was registered for
-the test `RWA1` asset here. This is the documented bring-up affordance from the contract's own
-module doc comment, not a statement about production readiness: a real deployment must call
-`configure_issuer_key` with a real issuer public key per asset and leave the requirement enabled.
+### Real price data (2026-10-08)
+
+`RWA1` is a token this repo issues, so it has no market of its own. It is priced as Etherfuse's real
+**USTRY** bond from two independent real sources: Etherfuse's public price API (issuer NAV) and
+RedStone's USTRY feed contract read from **mainnet** (RedStone publishes no RWA feeds on testnet).
+`scripts/real-sources.env` holds that mapping. Nothing on this deployment is mocked any more, and
+the earlier $1.00 test prices are gone. Changes made to this live deployment to get there:
+
+- `configure_issuer_key`: the price publisher's Ed25519 key is registered as `RWA1`'s NAV attestor
+  (tx `c660ec72bee0fce070120c0ea550b3d73bf263bcd841734ed1632a558bd3279e`), and
+  `configure_signature_requirement --required true` re-enabled the on-chain check (tx
+  `7f44dbd5be7cc0fa674c67594b446c35e71ba4ea21b5504eb5557d8398591696`). No issuer signs NAV, so
+  the guarantee is that Ballast's publisher saw the value from the issuer's API, not issuer
+  attestation.
+- `max_staleness_s` raised from 3600 to 21600: RedStone's USTRY feed was 93 minutes old at the
+  first attempt, so with a 1h window the guard (correctly) reported `Degraded` and refused to lend.
+- The first real price (about $1.0764) halted the guard against the old fake $0.9999 baseline, as
+  designed. The `risk` role cleared it with `confirm_halt_cleared`. That account had never been
+  funded on testnet; it was funded through friendbot.
+- Borrower's test `RWA1` balance topped up from the test issuer (failed runs had locked it in the
+  vault).
+
+`scripts/e2e-smoke.sh testnet` passed again on this basis (line `13`): real NAV and oracle readings
+published with a real signature, `guarded_price` `Ok` at 1.076433, draw, repay, release, and the
+stranger-release rejection.
 
 ## Deployer / role addresses
 
@@ -138,7 +158,10 @@ Passed against this deployment with `pnpm dev` running, all on 2026-10-07:
   $0.62 (LTV 10183 bps), line liquidated by the keeper after its 60s cure window and the 100 RWA1
   sent to the lender (txs `9f480616bd1523085f026b9fa00f6e8c1bc391429d48d585a27b6266bc95f780`,
   `5a963e4652669f18a04cd132438ddb90f81cd1bb10b3cc9f67c5da67c70d8e0c`). Price and band restored
-  afterwards.
+  afterwards. **That run used the mock price file, which no longer exists.** The script now
+  tightens the line's margin thresholds under its real LTV instead. Re-run on 2026-10-08 against
+  real prices (LTV 5867 bps): thresholds tightened, line liquidated by the keeper, thresholds
+  restored. `e2e-services.sh testnet` also passed again on the real price.
 
 That liquidated line is still `Liquidating` on-chain with its 60 TUSD of debt outstanding: the
 contracts have no step that closes a liquidated line or books recovered value against the debt.

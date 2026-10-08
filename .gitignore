@@ -25,4 +25,3 @@ contracts/**/test_snapshots/
 
 # Local data
 .pgdata/
-.mock-prices.json

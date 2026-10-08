@@ -72,12 +72,13 @@ This is a pnpm + Turborepo monorepo:
 - **Rust / Soroban**: contracts target `no_std`. Don't add a dependency that pulls in `std` (it
   won't compile to `wasm32v1-none`). Follow the existing pattern of documenting any deliberate
   simplification in a module-level doc comment rather than leaving it silent.
-- **No mock data on the production path.** Adapters that stand in for a real integration
-  (`services/*/adapters/mock*.ts`) are fine for local dev and tests, gated behind an explicit
-  `*_MODE=mock` env var — but they must never be the default in a code path that claims to be
-  live. If you're adding a new external integration, follow the pattern in
-  `services/issuer-gateway/src/registry.ts` or `services/price-guard/src/adapters/registry.ts`
-  (an explicit mode flag, fail-fast on missing config, mock/live cleanly separated).
+- **No mock data anywhere in `src`.** Services read real sources only (see
+  `services/price-guard/src/adapters/`); there is no `mock` mode and no fake adapter to fall back
+  on. A source that is unavailable or unconfigured must fail loudly or skip the asset, never answer
+  with a made-up value. Test doubles belong in `*.test.ts` files, and anything they replay from an
+  external API should be a response recorded from the real endpoint (`__fixtures__/`), not
+  hand-written. A new integration should fail fast on missing config and alert on a failed fetch,
+  as `services/price-guard/src/pipeline.ts` does.
 - **Secrets**: never hardcode a key, API key, or webhook secret. Add a new env var to
   `.env.example` (with a comment explaining what it's for) instead.
 - **Commits**: write a clear, specific subject line describing the change; add a body when the
@@ -157,7 +158,7 @@ collateral).
 ## Pull Request Checklist
 
 - [ ] The relevant per-surface checks above pass
-- [ ] No new mock/fake data was added to a path that isn't explicitly gated behind a `mock` mode
+- [ ] No mock/fake data was added outside test files
 - [ ] No secret, key, or credential was hardcoded — new config went into `.env.example`
 - [ ] Docs were updated if behavior, setup steps, or env vars changed (`README.md`, the relevant
       service/package `README.md`, `TESTNET_DEPLOYMENT.md` if you redeployed)

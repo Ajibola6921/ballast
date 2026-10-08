@@ -49,8 +49,8 @@ Out of scope:
   weren't otherwise exposed by this codebase.
 - Issues in third-party dependencies — report those upstream (though we'd still like to know, so
   we can update).
-- The mock/local-dev-only code paths (`*/adapters/mock*.ts`, the `local` operator-signer mode,
-  `ENABLE_DEV_LOGIN`) when explicitly gated and not reachable in a production configuration —
+- The local-dev-only code paths (the `local` operator-signer mode, `ENABLE_DEV_LOGIN`) when
+  explicitly gated and not reachable in a production configuration —
   these are documented, intentional local-development affordances, not vulnerabilities. If you
   believe one of these gates can be bypassed in a real deployment, that *is* in scope.
 

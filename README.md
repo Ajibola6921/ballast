@@ -99,7 +99,9 @@ were never signed.
 Around that: `services/price-guard` keeps the on-chain price fresh; `services/keeper` syncs
 pledged collateral into the credit line, unwinds repos at maturity and runs liquidations;
 `services/margin-monitor` records margin-state changes; `services/indexer` mirrors contract
-events. [`scripts/README.md`](scripts/README.md) has the details and what is still mocked.
+events. [`scripts/README.md`](scripts/README.md) has the details and what is not covered. Prices come
+from real sources (Etherfuse and Spiko NAV APIs, RedStone's on-chain feeds); NAV is signed by
+Ballast's own publisher key, not by issuers, since no issuer signs it.
 
 ## Contributing
 
