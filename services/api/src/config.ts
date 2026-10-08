@@ -3,6 +3,7 @@
  * typed config instead of `process.env` directly (mirrors the pattern in
  * `@ballast/network-config`).
  */
+import { readFileSync } from "node:fs";
 import { loadNetworkConfig } from "@ballast/network-config";
 
 export interface ApiConfig {
@@ -53,7 +54,30 @@ const PRODUCTION_REQUIRED = [
   "CONSOLE_ORIGIN",
 ] as const;
 
-export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
+/**
+ * Resolves a secret from `NAME`, or from the file named by `NAME_FILE` (the convention Docker and
+ * Kubernetes secrets use), so a secret never has to sit in the process environment where a crash
+ * dump or `docker inspect` would show it. The environment value wins if both are set.
+ */
+export function readSecret(name: string, env: NodeJS.ProcessEnv): string | undefined {
+  if (env[name]) return env[name];
+  const file = env[`${name}_FILE`];
+  if (!file) return undefined;
+  try {
+    return readFileSync(file, "utf8").trim() || undefined;
+  } catch (err) {
+    throw new Error(`services/api: cannot read ${name}_FILE (${file}): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export function loadApiConfig(rawEnv: NodeJS.ProcessEnv = process.env): ApiConfig {
+  // Secrets may come from NAME_FILE; resolve them once and let the rest of this function read `env`.
+  const env: NodeJS.ProcessEnv = { ...rawEnv };
+  for (const name of ["SEP10_SERVER_SECRET", "JWT_SIGNING_SECRET", "WEBHOOK_SECRET_KEY", "API_KEY_SECRET_KEY"]) {
+    const value = readSecret(name, rawEnv);
+    if (value) env[name] = value;
+  }
+
   if (env.NODE_ENV === "production") {
     const missing = PRODUCTION_REQUIRED.filter((key) => !env[key]);
     if (missing.length > 0) {

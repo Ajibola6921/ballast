@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadApiConfig } from "../config.js";
 
@@ -48,5 +51,22 @@ describe("loadApiConfig", () => {
     const config = loadApiConfig(NETWORK_ENV);
     expect(config.sep10ServerSecret).toBe("");
     expect(config.jwtSigningSecret).toBe("");
+  });
+
+  it("reads a secret from NAME_FILE when the variable itself is not set, trimming the newline", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ballast-secret-"));
+    const file = join(dir, "jwt");
+    writeFileSync(file, "secret-from-a-file\n");
+    const { JWT_SIGNING_SECRET: _omit, ...rest } = PRODUCTION_REQUIRED_ENV;
+    const config = loadApiConfig({ ...rest, JWT_SIGNING_SECRET_FILE: file });
+    expect(config.jwtSigningSecret).toBe("secret-from-a-file");
+  });
+
+  it("prefers the variable over the file, and fails clearly on an unreadable file", () => {
+    expect(loadApiConfig({ ...PRODUCTION_REQUIRED_ENV, JWT_SIGNING_SECRET_FILE: "/nonexistent" }).jwtSigningSecret).toBe(
+      PRODUCTION_REQUIRED_ENV.JWT_SIGNING_SECRET,
+    );
+    const { JWT_SIGNING_SECRET: _omit, ...rest } = PRODUCTION_REQUIRED_ENV;
+    expect(() => loadApiConfig({ ...rest, JWT_SIGNING_SECRET_FILE: "/nonexistent/secret" })).toThrowError(/JWT_SIGNING_SECRET_FILE/);
   });
 });
