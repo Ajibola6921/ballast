@@ -125,6 +125,9 @@ export interface LineDetail {
   priceStatus: string | null;
   ltvBps: number;
   marginState: string;
+  undrawn: string | null;
+  claimableInterest: string | null;
+  liquidation: { closed: boolean; debt: string; recovered: string; surplus: string; shortfall: string } | null;
 }
 
 export function run(main: () => Promise<void>): void {

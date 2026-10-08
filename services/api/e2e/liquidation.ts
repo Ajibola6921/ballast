@@ -5,7 +5,8 @@
  * moving the threshold, not the price, which stays whatever the live sources report. From there no
  * customer does anything: `services/margin-monitor` records the state change, and
  * `services/keeper` arms the breach, waits out the cure window, liquidates the line and sends the
- * collateral to the lender.
+ * collateral to the lender. The lender then closes the line, which books the outcome on-chain and
+ * pays the borrower the surplus, and withdraws the funding that was never drawn.
  *
  * Run via `scripts/e2e-liquidation.sh`, which puts the original thresholds back on exit.
  */
@@ -124,6 +125,25 @@ async function main() {
     "margin-monitor recorded the move into Liquidation",
   );
   step(`  liquidated ${liquidation.units} RWA1 to the lender; txs ${liquidation.txHashes.join(", ")}`);
+
+  step("Lender closes the liquidated line: the contract books the outcome at the price it confirmed");
+  await act(lenderSession, lender, "POST", `${linePath}/close-liquidation`);
+  line = await waitFor("the line to be closed", readLine, (l) => l.status === "closed");
+  const outcome = line.liquidation;
+  assert(outcome?.closed, "the contract recorded a closed liquidation");
+  const debt = BigInt(outcome.debt);
+  const recovered = BigInt(outcome.recovered);
+  assert(debt >= 60n * UNIT && debt < 61n * UNIT, `debt at liquidation is the 60 TUSD drawn plus dust interest (got ${debt})`);
+  // 100 RWA1 valued at the guarded price, no haircut: well above the 60 TUSD owed.
+  assert(recovered > debt, `the collateral (${recovered}) covers the debt (${debt})`);
+  assert(BigInt(outcome.surplus) === recovered - debt && BigInt(outcome.shortfall) === 0n, "surplus is exactly collateral minus debt");
+  step(`  debt ${debt}, collateral ${recovered}, surplus paid to the borrower ${outcome.surplus}`);
+
+  step("Lender withdraws the funding that was never drawn");
+  const undrawn = BigInt(line.undrawn ?? "0");
+  assert(undrawn === 20n * UNIT, `20 of the 80 TUSD funded was never drawn (got ${undrawn})`);
+  await act(lenderSession, lender, "POST", `${linePath}/withdrawals`, { kind: "undrawn", amount: undrawn.toString() });
+  line = await waitFor("the undrawn balance to reach zero", readLine, (l) => BigInt(l.undrawn ?? "1") === 0n);
 
   console.log(">>> Liquidation E2E passed.");
 }

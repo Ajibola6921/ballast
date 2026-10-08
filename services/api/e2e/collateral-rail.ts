@@ -137,6 +137,22 @@ async function main() {
   );
   step(`  collateral value = ${line.collateralValue}`);
 
+  step("Lender takes the repaid interest and the undrawn funding back out");
+  const readAsLender = () => call<LineDetail>("GET", linePath, lenderSession.token);
+  line = await readAsLender();
+  const interest = BigInt(line.claimableInterest ?? "0");
+  const undrawn = BigInt(line.undrawn ?? "0");
+  assert(interest > 0n, `the interest the borrower paid is claimable (got ${interest})`);
+  assert(undrawn === 50n * UNIT, `all 50 TUSD funded is undrawn again after the repayment (got ${undrawn})`);
+  await act(lenderSession, lender, "POST", `${linePath}/withdrawals`, { kind: "interest", amount: interest.toString() });
+  await act(lenderSession, lender, "POST", `${linePath}/withdrawals`, { kind: "undrawn", amount: undrawn.toString() });
+  line = await waitFor(
+    "nothing left to withdraw",
+    readAsLender,
+    (l) => BigInt(l.undrawn ?? "1") === 0n && BigInt(l.claimableInterest ?? "1") === 0n,
+  );
+  step(`  withdrew ${interest} interest and ${undrawn} principal`);
+
   console.log(">>> Services E2E passed.");
 }
 
