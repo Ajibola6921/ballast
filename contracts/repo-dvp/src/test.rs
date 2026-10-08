@@ -564,3 +564,28 @@ fn margin_view_reports_the_position_without_changing_it() {
     );
     assert!(!repo.margin_view(&id).price_ok);
 }
+
+#[test]
+fn the_admin_can_shorten_the_cure_window_for_new_calls() {
+    let h = setup();
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+    assert_eq!(repo.cure_grace_seconds(), 24 * 60 * 60);
+
+    repo.set_cure_grace(&h.admin, &120);
+    let id = settled_under_margin(&h);
+    let before = h.env.ledger().timestamp();
+    repo.call_margin(&h.keeper, &id);
+
+    assert_eq!(repo.trade(&id).cure_deadline, Some(before + 120));
+}
+
+#[test]
+fn the_cure_window_has_a_floor_and_only_the_admin_sets_it() {
+    let h = setup();
+    let repo = RepoDvpClient::new(&h.env, &h.repo);
+    let too_short = panic::catch_unwind(AssertUnwindSafe(|| repo.set_cure_grace(&h.admin, &30)));
+    assert!(too_short.is_err(), "a 30s window must be refused");
+    let stranger = Address::generate(&h.env);
+    let not_admin = panic::catch_unwind(AssertUnwindSafe(|| repo.set_cure_grace(&stranger, &3_600)));
+    assert!(not_admin.is_err(), "only the admin may set it");
+}

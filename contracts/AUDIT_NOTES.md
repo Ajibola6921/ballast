@@ -1,0 +1,85 @@
+# Notes for an auditor
+
+What the contracts assume, what they trust, and where they are deliberately simple. Written from the
+code as it stands; read it alongside the module docs at the top of each `lib.rs`.
+
+## Roles and trust
+
+| Role | Can | Cannot |
+|---|---|---|
+| `admin` | configure assets, thresholds, price bands; set the NAV attestor key | move any user's funds (no `admin_withdraw`/sweep anywhere); sign for a borrower or lender |
+| `pauser` | pause draws/pledges/exits by scope | pause repayment, release or withdrawal paths (invariant 5) |
+| `keeper` | `sync_collateral`, `liquidate`, vault `liquidate`, repo `call_margin`/`default_close`, `poke` | choose a price; liquidate without a confirmed breach on a later ledger |
+| `price_publisher` | publish NAV (signature-checked) and feed readings | set the guarded price; clear a halt |
+| `risk` | `confirm_halt_cleared` | publish prices |
+
+The keeper is trusted for **timing and completeness**, not for **value**: every amount a settlement
+uses comes from the contract's own state or from the PriceGuard, never from a keeper-supplied number.
+
+## PriceGuard
+
+- The guarded price is the median of fresh sources. Fewer than two fresh sources is `Degraded`;
+  disagreement beyond `band_bps` is `Degraded`; a move beyond `daily_move_band_bps` is a sticky
+  `Halted` that only `risk` clears.
+- NAV is signed by the **price publisher's** key (`configure_issuer_key` registers it), because
+  issuers publish unsigned data. The signature therefore proves "Ballast's publisher read this from
+  the issuer's API", not "the issuer attested it". Do not describe it as issuer attestation.
+- `max_staleness_s` is per deployment; RedStone's RWA feeds update every 1-2 hours, so values under
+  that make the guard refuse to lend.
+
+## CreditLine
+
+- **Liquidation is in kind.** `liquidate` flips the line to `Liquidating` and *freezes* the seized
+  units (the whole synced position), the confirmed guarded price and the debt in a
+  `LiquidationRecord`. The keeper then moves the collateral to the lender with
+  `PledgeVault::liquidate`. These are two transactions by a trusted keeper; the contracts do not
+  link them. The keeper job refuses to liquidate while booked and on-chain pledged units differ
+  (`sync_collateral` lag), so the units it seizes equal the units the record uses.
+- **`close_liquidated`** (lender-signed) values the collateral at the *frozen* price with no
+  haircut, pays any surplus from the lender's USDC to the borrower in the same call, records any
+  shortfall, writes unrecovered principal off `funded` and closes the line. The lender cannot
+  choose the price or understate the collateral, but **can choose when to close**; until they do
+  the line stays `Liquidating` and the borrower's surplus is not paid. There is no borrower-side
+  or keeper-side close.
+- **Lender withdrawals** exist because without them repaid principal and interest were locked in
+  the contract. `withdraw_undrawn` returns committed USDC that is not out on loan (reducing
+  `funded`); `withdraw_interest` returns repaid interest, tracked separately in `Claimable(line)`.
+  Both are lender-only and not pause-gated.
+- `draw` enforces `limit` (it previously only checked `funded`). `fund` is refused on a closed line.
+- Interest is simple, non-compounding, accrued on principal per second.
+- `sync_collateral` is a keeper/admin-set figure, not a live read of the vault (avoids a circular
+  dependency). A stale figure under-states collateral (safe for the lender) or over-states it
+  (unsafe) until the next sync; the keeper syncs every minute.
+
+## PledgeVault
+
+- `release` cross-calls `CreditLine::ltv` and `borrower_of`; ownership is checked there.
+- `liquidate` has no LTV check by design: it is the liquidation path, keeper-gated. Its safety
+  depends on `CreditLine::liquidate` having confirmed the breach first, enforced off-chain by the
+  keeper job, not on-chain.
+
+## RepoDvP
+
+- Cash legs are not escrowed; each is pre-authorised with a token allowance granted in the call the
+  paying party signs (see the module docs). One live proposal per (lender, token): a second
+  `propose` replaces the first one's allowance.
+- **Margin.** `call_margin` opens a call at `MarginCall` or worse, never moves an open call's
+  deadline, and clears the call when the position is back under the band. `top_up` (borrower)
+  adds collateral and clears the call in the same transaction if that is enough; it is not
+  pause-gated. `margin_view` is a free read.
+- **Default.** `default_close` is keeper-only, needs the cure window to have passed, re-evaluates
+  the position and refuses a cured one. The lender receives `ceil(exposure / price)` units at the
+  guarded price with no haircut, capped at the pledge; any remainder returns to the borrower. If the
+  collateral is worth less than the exposure the lender takes all of it and bears the shortfall.
+  No USDC moves on default.
+- Yield on the pledged RWA during the term is not passed through.
+
+## Known limits
+
+- Real RWAs cannot be held by these contracts unless the issuer allows it (`AUTH_REQUIRED`
+  issuers must authorise the vault's trustline). Etherfuse's issuer sets `auth_revocable` and
+  `clawback_enabled`, so it can freeze or claw back tokens held in the vault; price that in.
+- Events use `env.events().publish`, which soroban-sdk deprecates in favour of `#[contractevent]`;
+  moving changes the encoding and needs the indexer and ledger readers updated together.
+- No contract has been audited. `cargo test` covers the unit tests in each crate; the end-to-end
+  scripts in `scripts/` exercise them on testnet.

@@ -143,7 +143,11 @@ async function main() {
   const interest = BigInt(line.claimableInterest ?? "0");
   const undrawn = BigInt(line.undrawn ?? "0");
   assert(interest > 0n, `the interest the borrower paid is claimable (got ${interest})`);
-  assert(undrawn === 50n * UNIT, `all 50 TUSD funded is undrawn again after the repayment (got ${undrawn})`);
+  // The 20 repaid paid the interest first, so a few stroops of principal are still out on loan.
+  assert(
+    undrawn > 50n * UNIT - UNIT / 100n && undrawn <= 50n * UNIT,
+    `the funded 50 TUSD is undrawn again, less the dust of principal still owed (got ${undrawn})`,
+  );
   await act(lenderSession, lender, "POST", `${linePath}/withdrawals`, { kind: "interest", amount: interest.toString() });
   await act(lenderSession, lender, "POST", `${linePath}/withdrawals`, { kind: "undrawn", amount: undrawn.toString() });
   line = await waitFor(

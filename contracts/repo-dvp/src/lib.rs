@@ -71,6 +71,10 @@ use soroban_sdk::{
 /// cure": default 24h cure window, reused here for repo margin calls).
 pub const MARGIN_CURE_GRACE_SECONDS: u64 = 24 * 60 * 60;
 
+/// The shortest cure window the admin may configure. A window shorter than a minute leaves a
+/// borrower no real chance to respond, whatever a keeper's schedule.
+pub const MIN_CURE_GRACE_SECONDS: u64 = 60;
+
 /// How long past maturity the borrower's leg-2 allowance stays spendable (about one week of
 /// ~5s ledgers), so a late keeper run can still unwind.
 pub const UNWIND_ALLOWANCE_GRACE_LEDGERS: u32 = 120_960;
@@ -161,6 +165,15 @@ enum DataKey {
     Usdc,
     AssetConfig(Address),
     Trade(u64),
+    CureGrace,
+}
+
+/// The cure window a margin call opens with: the admin's setting, else the 24h default.
+fn cure_grace(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::CureGrace)
+        .unwrap_or(MARGIN_CURE_GRACE_SECONDS)
 }
 
 fn read_asset_config(env: &Env, asset: &Address) -> RepoAssetConfig {
@@ -307,6 +320,21 @@ impl RepoDvp {
     pub fn set_usdc(env: Env, admin: Address, usdc: Address) {
         require_admin_is(&env, &admin);
         env.storage().instance().set(&DataKey::Usdc, &usdc);
+    }
+
+    /// Sets how long a borrower has to cure a margin call opened from now on (default 24h, at
+    /// least [`MIN_CURE_GRACE_SECONDS`]). Calls already open keep the deadline they were given.
+    pub fn set_cure_grace(env: Env, admin: Address, seconds: u64) {
+        require_admin_is(&env, &admin);
+        assert!(
+            seconds >= MIN_CURE_GRACE_SECONDS,
+            "repo-dvp: cure window is shorter than the minimum"
+        );
+        env.storage().instance().set(&DataKey::CureGrace, &seconds);
+    }
+
+    pub fn cure_grace_seconds(env: Env) -> u64 {
+        cure_grace(&env)
     }
 
     pub fn configure_asset(
@@ -550,7 +578,7 @@ impl RepoDvp {
             trade.margin_call_amount = (target_collateral - collateral_value).max(0);
             if !trade.pending_margin_call {
                 trade.pending_margin_call = true;
-                trade.cure_deadline = Some(now + MARGIN_CURE_GRACE_SECONDS);
+                trade.cure_deadline = Some(now + cure_grace(&env));
             }
             write_trade(&env, &trade);
             env.events()
