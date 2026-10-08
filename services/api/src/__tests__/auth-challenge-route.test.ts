@@ -19,8 +19,7 @@ const config: ApiConfig = {
   sep10HomeDomain: HOME_DOMAIN,
   sep10WebAuthDomain: HOME_DOMAIN,
   networkPassphrase: NETWORK_PASSPHRASE,
-  webhookHmacSecret: "test-webhook-secret",
-  webhookSubscribers: [],
+  webhookSecretKey: "00".repeat(32),
   institutionApiKeys: {},
   consoleOrigin: "http://localhost:5173",
 };

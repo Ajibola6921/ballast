@@ -6,6 +6,8 @@ import { getChainGateway } from "./chain.js";
 import { getContractClients } from "./contract-clients.js";
 import { getDb } from "./db.js";
 import { sweepPendingIntents } from "./intents.js";
+import { deliverDue, fanOutRecentEvents } from "./webhooks/outbox.js";
+import { isValidSecretKey } from "./webhooks/secretBox.js";
 
 const logger = createLogger("api");
 const config = loadApiConfig();
@@ -30,6 +32,32 @@ setInterval(async () => {
     sweeping = false;
   }
 }, SWEEP_INTERVAL_MS).unref();
+
+const WEBHOOK_INTERVAL_MS = Number(process.env.API_WEBHOOK_INTERVAL_MS ?? 10_000);
+if (isValidSecretKey(config.webhookSecretKey)) {
+  let delivering = false;
+  setInterval(async () => {
+    if (delivering) return;
+    delivering = true;
+    try {
+      const enqueued = await fanOutRecentEvents(db);
+      const tally = await deliverDue(db, {
+        secretKey: config.webhookSecretKey,
+        allowHttp: process.env.NODE_ENV !== "production",
+        log: (message, fields) => logger.warn(fields, message),
+      });
+      if (enqueued + tally.delivered + tally.retried + tally.dead > 0) {
+        logger.info({ enqueued, ...tally }, "webhook outbox pass");
+      }
+    } catch (err) {
+      logger.error({ err }, "webhook outbox pass failed");
+    } finally {
+      delivering = false;
+    }
+  }, WEBHOOK_INTERVAL_MS).unref();
+} else {
+  logger.warn("WEBHOOK_SECRET_KEY is not set: webhook subscriptions and delivery are disabled");
+}
 
 app.addHook("onResponse", async (request, reply) => {
   logger.info(

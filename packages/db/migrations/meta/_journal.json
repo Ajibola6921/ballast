@@ -36,6 +36,13 @@
       "when": 1791469103249,
       "tag": "0004_chain_event_event_id",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791469196293,
+      "tag": "0005_webhook_outbox",
+      "breakpoints": true
     }
   ]
 }

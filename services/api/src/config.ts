@@ -23,12 +23,9 @@ export interface ApiConfig {
    * through `@ballast/network-config` so it stays in sync with the rest of the service's Stellar
    * config instead of being a second, independently-configured copy. */
   networkPassphrase: string;
-  webhookHmacSecret: string;
-  /**
-   * Gap noted per task spec: subscriber URLs come from a static env-configured list rather than
-   * a full subscription-management API (POST /v1/webhooks/subscriptions or similar). Follow-up.
-   */
-  webhookSubscribers: string[];
+  /** 32-byte key (64 hex chars) that encrypts webhook signing secrets at rest. Webhook
+   * subscriptions are refused (503) while it is unset. */
+  webhookSecretKey: string;
   /**
    * Institution API-key auth (PRD §9 "API key + HMAC for institutions"). Stubbed as an env var
    * map of `apiKey -> { partyId, stellarAccount, hmacSecret }` JSON-encoded, rather than reading
@@ -45,14 +42,14 @@ export interface ApiConfig {
  * Secrets that must be real, non-empty values before this service is safe to run in production.
  * Left unset, they're fine in dev/test (`buildServer()`'s injectable `config` option already lets
  * tests bypass this function entirely) but would otherwise let the service boot with a blank JWT
- * secret, a blank SEP-10 signing key, a blank webhook HMAC secret, or a wide-open CORS origin.
+ * secret, a blank SEP-10 signing key, a blank webhook secret key, or a wide-open CORS origin.
  * Mirrors the `REQUIRED` + `.filter` + one combined thrown-error-message pattern in
  * `packages/network-config/src/index.ts`.
  */
 const PRODUCTION_REQUIRED = [
   "SEP10_SERVER_SECRET",
   "JWT_SIGNING_SECRET",
-  "WEBHOOK_HMAC_SECRET",
+  "WEBHOOK_SECRET_KEY",
   "CONSOLE_ORIGIN",
 ] as const;
 
@@ -73,6 +70,10 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     }
   }
 
+  if (env.WEBHOOK_SECRET_KEY && !/^[0-9a-fA-F]{64}$/.test(env.WEBHOOK_SECRET_KEY)) {
+    throw new Error("services/api: WEBHOOK_SECRET_KEY must be 32 bytes as 64 hex characters");
+  }
+
   return {
     port: env.API_PORT ? Number(env.API_PORT) : 3000,
     jwtSigningSecret: env.JWT_SIGNING_SECRET ?? "",
@@ -80,11 +81,7 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     sep10HomeDomain: env.SEP10_HOME_DOMAIN ?? "localhost",
     sep10WebAuthDomain: env.SEP10_WEB_AUTH_DOMAIN ?? env.SEP10_HOME_DOMAIN ?? "localhost",
     networkPassphrase: loadNetworkConfig(env).networkPassphrase,
-    webhookHmacSecret: env.WEBHOOK_HMAC_SECRET ?? "",
-    webhookSubscribers: (env.WEBHOOK_SUBSCRIBERS ?? "")
-      .split(",")
-      .map((url) => url.trim())
-      .filter(Boolean),
+    webhookSecretKey: env.WEBHOOK_SECRET_KEY ?? "",
     institutionApiKeys,
     consoleOrigin: env.CONSOLE_ORIGIN ?? "http://localhost:5173",
   };

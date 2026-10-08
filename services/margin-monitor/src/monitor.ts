@@ -5,11 +5,9 @@
  * value the contract itself would use for a real liquidation.
  *
  * Boundary: this service's job ends at writing the `margin_event` row and firing an internal
- * alert. PRD §5 Phase 1 also wants "webhooks and email at each change" — that dispatch is
- * services/api's job (its webhook dispatcher, per PRD §9's `margin.state_changed` /
- * `margin.call_issued` events). A follow-up integration should have services/api watch for new
- * `margin_event` rows (or a shared event bus) and fan out from there; this service does not call
- * services/api directly.
+ * alert. Webhooks to subscribers are services/api's outbox (`webhooks/outbox.ts`), which scans
+ * new `margin_event` rows and enqueues one signed delivery per matching subscription; this
+ * service does not call services/api directly.
  *
  * Calling `liquidate` itself is services/keeper's job (see `cureExpiry.ts`), triggered once the
  * cure window on a `MarginCall` state has elapsed — this service only detects and records state

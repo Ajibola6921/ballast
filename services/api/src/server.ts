@@ -12,6 +12,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerDevAuthRoutes } from "./routes/dev-auth.js";
 import { registerAssetRoutes } from "./routes/assets.js";
 import { registerMarketRoutes } from "./routes/markets.js";
+import { registerWebhookRoutes } from "./routes/webhooks.js";
 import { registerCreditLineRoutes } from "./routes/credit-lines.js";
 import { registerExitRoutes } from "./routes/exit.js";
 import { registerRepoRoutes } from "./routes/repo.js";
@@ -78,6 +79,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
 
   registerAssetRoutes(app, db);
   registerMarketRoutes(app, db);
+  registerWebhookRoutes(app, db, config);
   registerCreditLineRoutes(app, db, contracts, chain);
   registerExitRoutes(app, db, contracts, chain);
   registerRepoRoutes(app, db, contracts, chain);

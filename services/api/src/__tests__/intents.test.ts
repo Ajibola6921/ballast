@@ -210,8 +210,7 @@ describe("POST /v1/tx/submit", () => {
     sep10HomeDomain: "localhost",
     sep10WebAuthDomain: "localhost",
     networkPassphrase: "Test SDF Network ; September 2015",
-    webhookHmacSecret: "test-webhook-secret",
-    webhookSubscribers: [],
+    webhookSecretKey: "00".repeat(32),
     institutionApiKeys: {},
     consoleOrigin: "http://localhost:5173",
   };

@@ -12,7 +12,7 @@ const PRODUCTION_REQUIRED_ENV = {
   NODE_ENV: "production",
   SEP10_SERVER_SECRET: "SBQWY3JPJKSAKQVQ7Q7TSPZCU5R5PGSWKZ35RQ7Q7TSPZCU5R5PGSWKZ",
   JWT_SIGNING_SECRET: "a-real-jwt-secret",
-  WEBHOOK_HMAC_SECRET: "a-real-webhook-secret",
+  WEBHOOK_SECRET_KEY: "ab".repeat(32),
   CONSOLE_ORIGIN: "https://console.example.com",
 };
 
@@ -21,7 +21,7 @@ describe("loadApiConfig", () => {
     const config = loadApiConfig(PRODUCTION_REQUIRED_ENV);
     expect(config.sep10ServerSecret).toBe(PRODUCTION_REQUIRED_ENV.SEP10_SERVER_SECRET);
     expect(config.jwtSigningSecret).toBe(PRODUCTION_REQUIRED_ENV.JWT_SIGNING_SECRET);
-    expect(config.webhookHmacSecret).toBe(PRODUCTION_REQUIRED_ENV.WEBHOOK_HMAC_SECRET);
+    expect(config.webhookSecretKey).toBe(PRODUCTION_REQUIRED_ENV.WEBHOOK_SECRET_KEY);
     expect(config.consoleOrigin).toBe(PRODUCTION_REQUIRED_ENV.CONSOLE_ORIGIN);
   });
 
@@ -32,7 +32,7 @@ describe("loadApiConfig", () => {
 
   it("throws listing every missing required secret at once, not just the first", () => {
     expect(() => loadApiConfig({ ...NETWORK_ENV, NODE_ENV: "production" })).toThrowError(
-      /SEP10_SERVER_SECRET.*JWT_SIGNING_SECRET.*WEBHOOK_HMAC_SECRET.*CONSOLE_ORIGIN/s,
+      /SEP10_SERVER_SECRET.*JWT_SIGNING_SECRET.*WEBHOOK_SECRET_KEY.*CONSOLE_ORIGIN/s,
     );
   });
 

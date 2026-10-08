@@ -353,6 +353,45 @@ export const chainEvent = pgTable(
   (t) => [uniqueIndex("chain_event_event_id_uq").on(t.eventId)],
 );
 
+// --- Webhooks (outbox) ---
+
+/** A party's registered webhook endpoint. `secretCiphertext` is the signing secret, encrypted
+ * with the API's WEBHOOK_SECRET_KEY; it is shown to the party once, at creation. */
+export const webhookSubscription = pgTable("webhook_subscription", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  partyId: uuid("party_id")
+    .notNull()
+    .references(() => party.id),
+  url: text("url").notNull(),
+  events: jsonb("events").notNull(),
+  secretCiphertext: text("secret_ciphertext").notNull(),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** One event for one subscription. `eventKey` identifies the source row (e.g.
+ * `margin_event:<id>`), so fanning out the same event twice cannot enqueue it twice. A delivery
+ * that exhausts its retries stays as `dead` (the dead-letter queue) rather than being dropped. */
+export const webhookDelivery = pgTable(
+  "webhook_delivery",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subscriptionId: uuid("subscription_id")
+      .notNull()
+      .references(() => webhookSubscription.id),
+    eventKey: text("event_key").notNull(),
+    event: text("event").notNull(),
+    payload: jsonb("payload").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("webhook_delivery_sub_event_uq").on(t.subscriptionId, t.eventKey)],
+);
+
 export const reconciliationRun = pgTable("reconciliation_run", {
   id: uuid("id").primaryKey().defaultRandom(),
   scope: text("scope").notNull(),
