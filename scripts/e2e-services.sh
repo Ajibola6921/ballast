@@ -33,3 +33,4 @@ API_URL="http://localhost:${API_PORT:-3000}"
 
 pnpm --filter @ballast/service-api exec tsx e2e/collateral-rail.ts
 pnpm --filter @ballast/service-api exec tsx e2e/exit-repo.ts
+pnpm --filter @ballast/service-api exec tsx e2e/release-draw.ts

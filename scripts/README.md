@@ -83,6 +83,9 @@ submitted back through `POST /v1/tx/submit`. It runs two scripts from `services/
 
 - `collateral-rail.ts`: open, fund, two pledges, wait for `services/keeper` to sync the collateral
   and `services/price-guard` to publish an `Ok` price, draw, repay, release.
+- `release-draw.ts`: the release-then-draw race. A borrower releases collateral and draws in the next
+  breath; the draw is judged against what is left and refused, because the vault reports every change
+  to the credit line in the same transaction.
 - `exit-repo.ts`: an exit-desk quote and its execution; then a repo proposed by the lender,
   accepted by the borrower, and unwound at maturity by `services/keeper` with nobody else signing.
 
