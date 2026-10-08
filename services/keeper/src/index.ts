@@ -83,7 +83,7 @@ cron.schedule(INTEREST_ACCRUAL_CRON, () =>
   runJob("interest-accrual", () => runInterestAccrualJob(db, creditLineClient, signer)),
 );
 cron.schedule(SYNC_COLLATERAL_CRON, () =>
-  runJob("sync-collateral", () => runSyncCollateralJob(db, creditLineClient, signer)),
+  runJob("sync-collateral", () => runSyncCollateralJob(db, creditLineClient, pledgeVaultClient, signer)),
 );
 
 logger.info(

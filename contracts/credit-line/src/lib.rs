@@ -151,6 +151,8 @@ enum DataKey {
     AssetConfig(Address),
     NextLineId,
     Line(u64),
+    /// The `PledgeVault` allowed to report a line's collateral directly (see `sync_from_vault`).
+    Vault,
     /// Interest repaid on a line that the lender has not withdrawn yet.
     Claimable(u64),
     Liquidation(u64),
@@ -346,6 +348,46 @@ impl CreditLine {
         );
 
         state.funded += amount;
+        write_line(&env, line, &state);
+    }
+
+    /// Names the `PledgeVault` allowed to report collateral through `sync_from_vault`. Admin only.
+    pub fn set_vault(env: Env, admin: Address, vault: Address) {
+        let _ = admin;
+        access::require_admin(&env);
+        env.storage().instance().set(&DataKey::Vault, &vault);
+    }
+
+    /// The collateral asset of `line`, so the vault can refuse a pledge of the wrong token.
+    pub fn asset_of(env: Env, line: u64) -> Address {
+        read_line(&env, line).asset
+    }
+
+    /// Called by the configured `PledgeVault` in the same transaction as every pledge, release,
+    /// lien confirmation and liquidation, so the line's collateral figure moves with the vault's
+    /// balance instead of lagging it.
+    ///
+    /// The lag was exploitable: the figure used to change only when the keeper's periodic
+    /// `sync_collateral` ran, so a borrower could `release` collateral and then `draw` against the
+    /// units that had just left, inside the window before the next sync, leaving a line the lender
+    /// funded against collateral that was no longer there. `sync_collateral` stays as the keeper's
+    /// reconciliation path; this is the path that closes the window.
+    pub fn sync_from_vault(env: Env, vault: Address, line: u64, asset: Address, units: i128) {
+        vault.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Vault)
+            .expect("credit-line: vault not configured");
+        assert_eq!(vault, stored, "credit-line: caller is not the configured vault");
+        assert!(units >= 0, "credit-line: units cannot be negative");
+
+        let mut state = read_line(&env, line);
+        assert_eq!(
+            state.asset, asset,
+            "credit-line: not this line's collateral asset"
+        );
+        state.pledged_units = units;
         write_line(&env, line, &state);
     }
 
@@ -1157,5 +1199,77 @@ mod test {
             h.credit_line.fund(&h.lender, &id, &PRICE_SCALE);
         }));
         assert!(fund.is_err(), "fund on a closed line must fail");
+    }
+
+    // --- vault-reported collateral -----------------------------------------------------------
+
+    /// The vault is an address like any other here (the real one is a contract that authorizes
+    /// itself when it calls); `mock_all_auths` stands in for that.
+    fn with_vault(h: &Harness) -> Address {
+        let vault = Address::generate(&h.env);
+        h.credit_line.set_vault(&h.admin, &vault);
+        vault
+    }
+
+    #[test]
+    fn a_release_reported_by_the_vault_stops_the_borrower_drawing_against_it() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let vault = with_vault(&h);
+        let id = open_and_fund(&h, 1_000 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+        h.credit_line.sync_from_vault(&vault, &id, &h.asset, &(1_000 * PRICE_SCALE));
+        h.credit_line.draw(&h.borrower, &id, &(100 * PRICE_SCALE), &h.borrower.clone());
+
+        // The borrower releases 900 of the 1,000 units; the vault reports it in the same
+        // transaction. Collateral is now worth 100, so another 100 of debt would put the line at
+        // 200% of its collateral.
+        h.credit_line.sync_from_vault(&vault, &id, &h.asset, &(100 * PRICE_SCALE));
+        assert_eq!(h.credit_line.line(&id).pledged_units, 100 * PRICE_SCALE);
+
+        let draw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.credit_line.draw(&h.borrower, &id, &(100 * PRICE_SCALE), &h.borrower.clone());
+        }));
+        assert!(draw.is_err(), "a draw must see the collateral as it is now, not as the keeper last synced it");
+    }
+
+    #[test]
+    #[should_panic(expected = "credit-line: not this line's collateral asset")]
+    fn the_vault_cannot_report_a_different_asset_against_a_line() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let vault = with_vault(&h);
+        let id = open_and_fund(&h, 1_000 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+        h.credit_line.sync_from_vault(&vault, &id, &Address::generate(&h.env), &(1_000 * PRICE_SCALE));
+    }
+
+    #[test]
+    #[should_panic(expected = "credit-line: vault not configured")]
+    fn nothing_can_report_collateral_before_a_vault_is_configured() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        let id = open_and_fund(&h, 1_000 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+        h.credit_line.sync_from_vault(&Address::generate(&h.env), &id, &h.asset, &PRICE_SCALE);
+    }
+
+    #[test]
+    fn only_the_configured_vault_can_report_collateral() {
+        let h = setup(0, PRICE_SCALE, PriceStatus::Ok);
+        with_vault(&h);
+        let id = open_and_fund(&h, 1_000 * PRICE_SCALE, 1_000 * PRICE_SCALE);
+
+        // Authorize only the impostor, so this passes only if the contract fails to check the
+        // stored vault.
+        let impostor = Address::generate(&h.env);
+        h.env.mock_auths(&[MockAuth {
+            address: &impostor,
+            invoke: &MockAuthInvoke {
+                contract: &h.credit_line.address,
+                fn_name: "sync_from_vault",
+                args: (impostor.clone(), id, h.asset.clone(), 5_000 * PRICE_SCALE).into_val(&h.env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.credit_line.sync_from_vault(&impostor, &id, &h.asset, &(5_000 * PRICE_SCALE));
+        }));
+        assert!(result.is_err(), "only the configured vault may report collateral");
+        assert_eq!(h.credit_line.line(&id).pledged_units, 0);
     }
 }

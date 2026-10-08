@@ -66,7 +66,7 @@ function fixtures(marginEvents: unknown[], line: unknown = LINE) {
   ]);
 }
 
-function clients(view: object, onChain: object) {
+function clients(view: object, onChain: object, heldUnits: bigint = 1_500_000_000n) {
   return {
     creditLine: {
       ltv: vi.fn().mockResolvedValue(view),
@@ -74,7 +74,7 @@ function clients(view: object, onChain: object) {
       poke: vi.fn().mockResolvedValue("poke-xdr"),
       liquidate: vi.fn().mockResolvedValue("liquidate-xdr"),
     },
-    vault: { liquidate: vi.fn().mockResolvedValue("vault-xdr") },
+    vault: { liquidate: vi.fn().mockResolvedValue("vault-xdr"), positionUnits: vi.fn().mockResolvedValue(heldUnits) },
   };
 }
 
@@ -133,7 +133,7 @@ describe("runCureExpiryJob", () => {
         { toState: "Healthy", createdAt: longAgo() },
       ]),
     );
-    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100, pledgedUnits: 1_500_000_000n });
+    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100, pledgedUnits: 1_500_000_000n, asset: "CASSET" });
 
     expect(await run(db, c)).toEqual({ processed: 0, skipped: 1, errors: [] });
     expect(submitMock).not.toHaveBeenCalled();
@@ -148,7 +148,7 @@ describe("runCureExpiryJob", () => {
         { toState: "MarginCall", createdAt: longAgo() },
       ]),
     );
-    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100, pledgedUnits: 1_500_000_000n });
+    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100, pledgedUnits: 1_500_000_000n, asset: "CASSET" });
 
     expect(await run(db, c)).toEqual({ processed: 1, skipped: 0, errors: [] });
 
@@ -168,12 +168,13 @@ describe("runCureExpiryJob", () => {
     });
   });
 
-  it("waits for sync-collateral when the contract's pledged units differ from the books", async () => {
+  it("waits for sync-collateral when the credit line's figure differs from what the vault holds", async () => {
     const { db, inserted } = makeDb(fixtures([{ toState: "Liquidation", createdAt: longAgo() }]));
-    // A 50-unit pledge is booked but not yet pushed on-chain: the contract still counts 100.
+    // The vault holds 150 units but the credit line still counts 100.
     const c = clients(
       { state: "Liquidation", priceStatus: "Ok" },
-      { status: "Open", breachLedger: 100, pledgedUnits: 1_000_000_000n },
+      { status: "Open", breachLedger: 100, pledgedUnits: 1_000_000_000n, asset: "CASSET" },
+      1_500_000_000n,
     );
 
     expect(await run(db, c)).toEqual({ processed: 0, skipped: 1, errors: [] });
@@ -184,7 +185,7 @@ describe("runCureExpiryJob", () => {
 
   it("resumes at the vault when the line is already Liquidating on-chain", async () => {
     const { db, updated } = makeDb(fixtures([{ toState: "Liquidation", createdAt: new Date() }]));
-    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Liquidating", breachLedger: 100 });
+    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Liquidating", breachLedger: 100, asset: "CASSET" });
 
     expect(await run(db, c)).toEqual({ processed: 1, skipped: 0, errors: [] });
     expect(c.creditLine.liquidate).not.toHaveBeenCalled();
@@ -192,9 +193,23 @@ describe("runCureExpiryJob", () => {
     expect(updated).toContainEqual({ table: schema.creditLine, set: { status: "liquidating" } });
   });
 
+  it("books a liquidation whose vault transfer already happened in an earlier, interrupted run", async () => {
+    const { db, inserted, updated } = makeDb(fixtures([{ toState: "Liquidation", createdAt: new Date() }]));
+    const c = clients(
+      { state: "Liquidation", priceStatus: "Ok" },
+      { status: "Liquidating", breachLedger: 100, asset: "CASSET" },
+      0n, // nothing left in the vault
+    );
+
+    expect(await run(db, c)).toEqual({ processed: 1, skipped: 0, errors: [] });
+    expect(c.vault.liquidate).not.toHaveBeenCalled();
+    expect(updated).toContainEqual({ table: schema.creditLine, set: { status: "liquidating" } });
+    expect(inserted).toHaveLength(1);
+  });
+
   it("records an error and books nothing when a submission fails", async () => {
     const { db, inserted } = makeDb(fixtures([{ toState: "Liquidation", createdAt: longAgo() }]));
-    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100, pledgedUnits: 1_500_000_000n });
+    const c = clients({ state: "Liquidation", priceStatus: "Ok" }, { status: "Open", breachLedger: 100, pledgedUnits: 1_500_000_000n, asset: "CASSET" });
     submitMock.mockRejectedValue(new Error("rpc down"));
 
     const result = await run(db, c);

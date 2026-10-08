@@ -289,3 +289,67 @@ fn exit_panics_on_slippage() {
     // Demand more USDC than the discounted price can produce.
     ExitDeskClient::new(&h.env, &h.desk).exit(&holder, &h.rwa, &units, &(units + 1), &holder);
 }
+
+#[test]
+fn the_admin_can_take_the_usdc_float_back_out() {
+    let h = setup();
+    configure(&h, 100, 1_000_000 * PRICE_SCALE, 1_000_000 * PRICE_SCALE);
+    fund_desk(&h, 1_000 * PRICE_SCALE);
+
+    let treasury = Address::generate(&h.env);
+    ExitDeskClient::new(&h.env, &h.desk).withdraw(&h.admin, &h.usdc, &(400 * PRICE_SCALE), &treasury);
+
+    assert_eq!(MockTokenClient::new(&h.env, &h.usdc).balance(&treasury), 400 * PRICE_SCALE);
+    assert_eq!(MockTokenClient::new(&h.env, &h.usdc).balance(&h.desk), 600 * PRICE_SCALE);
+}
+
+#[test]
+fn withdrawing_rwa_inventory_frees_room_under_the_inventory_cap() {
+    let h = setup();
+    // The desk may hold at most 100 units.
+    configure(&h, 100, 1_000_000 * PRICE_SCALE, 100 * PRICE_SCALE);
+    set_price(&h, PRICE_SCALE, PriceStatus::Ok);
+    fund_desk(&h, 10_000 * PRICE_SCALE);
+    let desk = ExitDeskClient::new(&h.env, &h.desk);
+
+    let holder = Address::generate(&h.env);
+    MockTokenClient::new(&h.env, &h.rwa).mint(&holder, &(200 * PRICE_SCALE));
+    desk.exit(&holder, &h.rwa, &(100 * PRICE_SCALE), &0, &holder);
+
+    // Full: one more unit is refused.
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        desk.exit(&holder, &h.rwa, &PRICE_SCALE, &0, &holder);
+    }));
+    assert!(refused.is_err(), "the desk is at its inventory cap");
+
+    // The operator sells the inventory elsewhere and takes it out; exits resume.
+    let treasury = Address::generate(&h.env);
+    desk.withdraw(&h.admin, &h.rwa, &(60 * PRICE_SCALE), &treasury);
+    assert_eq!(MockTokenClient::new(&h.env, &h.rwa).balance(&treasury), 60 * PRICE_SCALE);
+    desk.exit(&holder, &h.rwa, &(50 * PRICE_SCALE), &0, &holder);
+}
+
+#[test]
+fn only_the_admin_can_withdraw() {
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    use soroban_sdk::IntoVal;
+    let h = setup();
+    fund_desk(&h, 1_000 * PRICE_SCALE);
+    let stranger = Address::generate(&h.env);
+    // Authorize only the stranger, so the call succeeds only if the contract fails to demand the
+    // stored admin's own signature.
+    h.env.mock_auths(&[MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &h.desk,
+            fn_name: "withdraw",
+            args: (stranger.clone(), h.usdc.clone(), PRICE_SCALE, stranger.clone()).into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ExitDeskClient::new(&h.env, &h.desk).withdraw(&stranger, &h.usdc, &PRICE_SCALE, &stranger);
+    }));
+    assert!(result.is_err(), "a stranger must not be able to drain the desk");
+    assert_eq!(MockTokenClient::new(&h.env, &h.usdc).balance(&h.desk), 1_000 * PRICE_SCALE);
+}

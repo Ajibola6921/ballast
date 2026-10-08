@@ -70,6 +70,8 @@ pub trait PriceGuardInterface {
 pub trait CreditLineInterface {
     fn ltv(env: Env, line: u64) -> LtvView;
     fn borrower_of(env: Env, line: u64) -> Address;
+    fn asset_of(env: Env, line: u64) -> Address;
+    fn sync_from_vault(env: Env, vault: Address, line: u64, asset: Address, units: i128);
 }
 
 /// Mirrors `ballast_credit_line::LtvView` field-for-field. Soroban structs are encoded on the
@@ -150,6 +152,18 @@ fn write_position(env: &Env, line: u64, asset: &Address, position: &Position) {
     env.storage()
         .persistent()
         .set(&DataKey::Position(line, asset.clone()), position);
+}
+
+/// Reports the position's counted units to the line in the same transaction, so `CreditLine`'s
+/// idea of the collateral can never lag what the vault actually holds (see
+/// `CreditLine::sync_from_vault`).
+fn sync_credit_line(env: &Env, config: &AssetConfig, line: u64, asset: &Address, position: &Position) {
+    CreditLineClient::new(env, &config.credit_line).sync_from_vault(
+        &env.current_contract_address(),
+        &line,
+        asset,
+        &position.units,
+    );
 }
 
 #[contract]
@@ -238,7 +252,29 @@ impl PledgeVault {
         assert!(units > 0, "pledge-vault: units must be positive");
 
         let config = read_asset_config(&env, &asset);
+        let credit_line = CreditLineClient::new(&env, &config.credit_line);
+        // Only the line's own borrower pledges to it, and only its collateral asset: otherwise a
+        // typo in a line id sends tokens into a position nobody but the real borrower can release.
+        assert_eq!(
+            borrower,
+            credit_line.borrower_of(&line),
+            "pledge-vault: caller is not this line's borrower"
+        );
+        assert_eq!(
+            asset,
+            credit_line.asset_of(&line),
+            "pledge-vault: not this line's collateral asset"
+        );
+
         let mut position = read_position(&env, line, &asset);
+        // A position holding units in one custody mode cannot take more in another: `release`
+        // moves tokens or not according to the mode recorded on the position, so flipping it under
+        // live units would strand them.
+        assert!(
+            (position.units == 0 && position.pending_lien_units == 0)
+                || position.mode == config.custody_mode,
+            "pledge-vault: asset custody mode changed while this position holds units"
+        );
 
         if config.custody_mode == CustodyMode::Escrow {
             let token_client = token::Client::new(&env, &asset);
@@ -247,8 +283,9 @@ impl PledgeVault {
         } else {
             position.pending_lien_units += units;
         }
-        position.mode = config.custody_mode;
+        position.mode = config.custody_mode.clone();
         write_position(&env, line, &asset, &position);
+        sync_credit_line(&env, &config, line, &asset, &position);
 
         env.events()
             .publish((Symbol::new(&env, "pledged"), line), (asset, units));
@@ -309,6 +346,7 @@ impl PledgeVault {
 
         position.units = remaining_units;
         write_position(&env, line, &asset, &position);
+        sync_credit_line(&env, &config, line, &asset, &position);
 
         env.events()
             .publish((Symbol::new(&env, "released"), line), (asset, units));
@@ -350,6 +388,7 @@ impl PledgeVault {
         position.units += units;
         position.lien_ref = Some(lien_ref);
         write_position(&env, line, &asset, &position);
+        sync_credit_line(&env, &read_asset_config(&env, &asset), line, &asset, &position);
     }
 
     /// The other half of invariant 4's release path. Not in the PRD §8 interface sketch for
@@ -383,6 +422,7 @@ impl PledgeVault {
 
         position.units -= units;
         write_position(&env, line, &asset, &position);
+        sync_credit_line(&env, &read_asset_config(&env, &asset), line, &asset, &position);
 
         env.events()
             .publish((Symbol::new(&env, "liquidated"), line), (asset, units, to));
@@ -499,6 +539,8 @@ mod test {
         enum DataKey {
             Debt,
             Borrower,
+            Asset,
+            Synced,
         }
 
         #[contractimpl]
@@ -527,6 +569,28 @@ mod test {
                     .instance()
                     .get(&DataKey::Borrower)
                     .expect("mock-credit-line: borrower not set")
+            }
+
+            pub fn set_asset(env: Env, asset: Address) {
+                env.storage().instance().set(&DataKey::Asset, &asset);
+            }
+
+            pub fn asset_of(env: Env, _line: u64) -> Address {
+                env.storage()
+                    .instance()
+                    .get(&DataKey::Asset)
+                    .expect("mock-credit-line: asset not set")
+            }
+
+            /// Records the last figure the vault reported, so tests can see that every change to a
+            /// position reached the credit line in the same transaction.
+            pub fn sync_from_vault(env: Env, vault: Address, _line: u64, _asset: Address, units: i128) {
+                vault.require_auth();
+                env.storage().instance().set(&DataKey::Synced, &units);
+            }
+
+            pub fn synced_units(env: Env) -> i128 {
+                env.storage().instance().get(&DataKey::Synced).unwrap_or(-1)
             }
         }
     }
@@ -587,6 +651,7 @@ mod test {
         price_guard.set_price(&price, &ballast_common::price::PriceStatus::Ok);
         credit_line.set_debt(&debt);
         credit_line.set_borrower(&borrower);
+        credit_line.set_asset(&token_id);
 
         Harness {
             env,
@@ -719,5 +784,55 @@ mod test {
         // collateral beyond what was actually pledged.
         h.vault
             .record_lien(&gateway, &3, &h.asset, &(101 * PRICE_SCALE), &lien_ref);
+    }
+
+    #[test]
+    fn every_change_to_a_position_reaches_the_credit_line_immediately() {
+        let h = setup(500, 100 * PRICE_SCALE, PRICE_SCALE);
+        h.token.mint(&h.borrower, &(1_000 * PRICE_SCALE));
+        assert_eq!(h.credit_line.synced_units(), -1, "nothing reported yet");
+
+        h.vault.pledge(&h.borrower, &1, &h.asset, &(1_000 * PRICE_SCALE));
+        assert_eq!(h.credit_line.synced_units(), 1_000 * PRICE_SCALE);
+
+        // The release that used to leave the line counting units that were already gone.
+        h.vault.release(&h.borrower, &1, &h.asset, &(400 * PRICE_SCALE));
+        assert_eq!(h.credit_line.synced_units(), 600 * PRICE_SCALE);
+
+        h.vault.liquidate(&Address::generate(&h.env), &1, &h.asset, &(600 * PRICE_SCALE), &Address::generate(&h.env));
+        assert_eq!(h.credit_line.synced_units(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "pledge-vault: caller is not this line's borrower")]
+    fn only_the_lines_borrower_can_pledge_to_it() {
+        let h = setup(500, 0, PRICE_SCALE);
+        let someone = Address::generate(&h.env);
+        h.token.mint(&someone, &(10 * PRICE_SCALE));
+        h.vault.pledge(&someone, &1, &h.asset, &(10 * PRICE_SCALE));
+    }
+
+    #[test]
+    #[should_panic(expected = "pledge-vault: not this line's collateral asset")]
+    fn a_line_only_takes_its_own_collateral_asset() {
+        let h = setup(500, 0, PRICE_SCALE);
+        // The line's collateral is `h.asset`; point it at some other token and the pledge is refused.
+        h.credit_line.set_asset(&Address::generate(&h.env));
+        h.token.mint(&h.borrower, &(10 * PRICE_SCALE));
+        h.vault.pledge(&h.borrower, &1, &h.asset, &(10 * PRICE_SCALE));
+    }
+
+    #[test]
+    #[should_panic(expected = "pledge-vault: asset custody mode changed while this position holds units")]
+    fn the_custody_mode_cannot_flip_under_live_units() {
+        let h = setup(500, 0, PRICE_SCALE);
+        h.token.mint(&h.borrower, &(100 * PRICE_SCALE));
+        h.vault.pledge(&h.borrower, &1, &h.asset, &(50 * PRICE_SCALE));
+
+        h.vault.configure_asset(
+            &h.admin, &h.asset, &h.price_guard.address, &h.credit_line.address, &500, &h.thresholds,
+            &CustodyMode::IssuerLien,
+        );
+        h.vault.pledge(&h.borrower, &1, &h.asset, &(50 * PRICE_SCALE));
     }
 }

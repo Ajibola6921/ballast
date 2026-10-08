@@ -77,9 +77,9 @@ pub struct ExitQuote {
 enum DataKey {
     Usdc,
     AssetConfig(Address),
-    /// Cumulative RWA units this desk currently holds for `asset` (PRD §5 Phase 2 "Limits": total
-    /// desk inventory cap tied to facility size). This skeleton never rebalances/withdraws, so it
-    /// only ever grows.
+    /// RWA units this desk currently holds for `asset` (PRD §5 Phase 2 "Limits": total desk
+    /// inventory cap tied to facility size). Grows with every exit and shrinks when the operator
+    /// takes inventory back out with `withdraw`.
     Inventory(Address),
     /// Units a `holder` has exited for `asset` within a given UTC day bucket
     /// (`timestamp / 86_400`), for the per-holder daily cap.
@@ -221,6 +221,39 @@ impl ExitDesk {
 
         env.events()
             .publish((symbol_short!("fund"), admin_or_keeper), amount);
+    }
+
+    /// The operator takes the desk's own assets back out: USDC float it no longer wants to deploy,
+    /// or the RWA inventory the desk has accumulated from exits (which would otherwise sit against
+    /// the inventory cap for good, eventually refusing every exit). Admin only.
+    ///
+    /// This is the desk's own balance, not user money: an exit is a single atomic swap, so nothing
+    /// belonging to a holder is ever in this contract between transactions (PRD §8 invariant 6
+    /// concerns user funds and is unaffected).
+    pub fn withdraw(env: Env, admin: Address, token: Address, amount: i128, to: Address) {
+        require_admin_is(&env, &admin);
+        assert!(amount > 0, "exit-desk: amount must be positive");
+
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            to_muxed(&to),
+            &amount,
+        );
+
+        // Taking an RWA out frees the same amount of room under its inventory cap.
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::AssetConfig(token.clone()))
+        {
+            let key = DataKey::Inventory(token.clone());
+            let held: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&key, &(held - amount.min(held)));
+        }
+
+        env.events().publish((symbol_short!("withdraw"), token), amount);
     }
 
     /// A pure(-ish) read: no auth required to get a quote, but it still refuses to quote on a

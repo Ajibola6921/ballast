@@ -1,32 +1,29 @@
 /**
- * PRD §6.5 / `contracts/credit-line/src/lib.rs::sync_collateral`'s own doc comment: "In the real
- * system the off-chain `margin-monitor` service keeps this synced from `PledgeVault`'s on-chain
- * balance via the indexer." Nothing did this until now — without it, every `CreditLine`'s
- * `pledged_units` stays at 0 forever, and every `draw` would be rejected as unhealthy (found in
- * audit; see `syncCollateral.test.ts`).
+ * Reconciles each open line's collateral figure on `CreditLine` with what `PledgeVault` actually
+ * holds for it.
  *
- * This keeper job (not margin-monitor — margin-monitor is a read-only observer with no signer;
- * writing on-chain state is keeper's job elsewhere in this codebase too) sums each open credit
- * line's `active` pledge units in Postgres and pushes the total via `CreditLine.sync_collateral`,
- * admin-or-keeper-gated on-chain. This is a Postgres-vs-chain proxy, same caveat as
- * `services/ledger`'s reconciliation: it trusts our own indexed pledge rows as ground truth for
- * "what's really pledged," rather than reading `PledgeVault`'s contract storage directly.
+ * The vault reports every change to a position to the credit line in the same transaction
+ * (`CreditLine::sync_from_vault`), so a healthy deployment never needs this job to change anything.
+ * It exists to repair drift: a line that predates the vault wiring, a vault reconfigured after
+ * positions existed, anything that left the two out of step. The vault's own balance is the source
+ * of truth. This job never derives the figure from Postgres: our pledge rows can lag a transaction
+ * by a sweep interval, and syncing from them would briefly write back a collateral number that no
+ * longer exists, reopening the release-then-draw window the vault reporting closes.
  *
- * A line whose on-chain `pledged_units` already equals that total is left alone (one read, no
- * transaction), which is what lets this job run every minute without paying a fee per line per
- * run — and a borrower who just pledged shouldn't wait longer than that to be able to draw.
+ * A line already in step costs two reads and no transaction, which is what lets this run every
+ * minute without paying a fee per line per run.
  */
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
-import { decimalStringToScaled } from "@ballast/domain-types";
 import { loadNetworkConfig } from "@ballast/network-config";
-import type { CreditLineClient } from "@ballast/contract-clients";
+import type { CreditLineClient, PledgeVaultClient } from "@ballast/contract-clients";
 import { submitSignedTx, type KmsSigner } from "@ballast/operator-signing";
 import { emptyResult, type JobResult } from "./types.js";
 
 export async function runSyncCollateralJob(
   db: Database,
   creditLineClient: CreditLineClient,
+  pledgeVaultClient: PledgeVaultClient,
   signer: KmsSigner,
 ): Promise<JobResult> {
   const result = emptyResult();
@@ -40,27 +37,16 @@ export async function runSyncCollateralJob(
     }
 
     try {
-      const activePledges = await db
-        .select()
-        .from(schema.pledge)
-        .where(and(eq(schema.pledge.creditLineId, line.id), eq(schema.pledge.status, "active")));
+      const contractLine = BigInt(line.contractLineId);
+      const onChain = await creditLineClient.line(contractLine);
+      const held = BigInt(await pledgeVaultClient.positionUnits(contractLine, onChain.asset));
 
-      const totalUnits = activePledges.reduce(
-        (sum, p) => sum + decimalStringToScaled(p.units),
-        0n,
-      );
-
-      const onChain = await creditLineClient.line(BigInt(line.contractLineId));
-      if (BigInt(onChain.pledgedUnits) === totalUnits) {
+      if (BigInt(onChain.pledgedUnits) === held) {
         result.skipped++;
         continue;
       }
 
-      const unsignedXdr = await creditLineClient.syncCollateral(
-        signer.publicKey(),
-        BigInt(line.contractLineId),
-        totalUnits,
-      );
+      const unsignedXdr = await creditLineClient.syncCollateral(signer.publicKey(), contractLine, held);
       const signedXdr = await signer.sign(unsignedXdr);
       const network = loadNetworkConfig();
       await submitSignedTx(network.rpcUrl, network.networkPassphrase, signedXdr);

@@ -28,7 +28,7 @@
  */
 import { and, desc, eq } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
-import { decimalStringToScaled, scaledToDecimalString } from "@ballast/domain-types";
+import { scaledToDecimalString } from "@ballast/domain-types";
 import { loadNetworkConfig } from "@ballast/network-config";
 import type { CreditLineClient, PledgeVaultClient } from "@ballast/contract-clients";
 import { submitSignedTx, type KmsSigner } from "@ballast/operator-signing";
@@ -109,27 +109,15 @@ export async function runCureExpiryJob(
         .limit(1);
       if (!lenderAccount) throw new Error(`no stellar account on file for lender ${line.lenderId}`);
 
-      const pledges = await db
-        .select()
-        .from(schema.pledge)
-        .where(and(eq(schema.pledge.creditLineId, line.id), eq(schema.pledge.status, "active")));
-
-      // The vault keeps one position per (line, asset), so pledges of the same asset move together.
-      const pledgesByAsset = new Map<string, typeof pledges>();
-      for (const pledge of pledges) {
-        pledgesByAsset.set(pledge.assetId, [...(pledgesByAsset.get(pledge.assetId) ?? []), pledge]);
-      }
-
-      // `CreditLine.liquidate` records the units it believes are pledged, and the lender is paid
-      // from exactly those when the line is closed. If a pledge or release has not been synced
-      // on-chain yet the two disagree, and seizing the books' figure would take collateral the
-      // contract never counted. Wait for the sync-collateral job instead.
-      if (!alreadyLiquidating) {
-        const booked = pledges.reduce((sum, p) => sum + decimalStringToScaled(p.units), 0n);
-        if (booked !== BigInt(onChain.pledgedUnits)) {
-          result.skipped++;
-          continue;
-        }
+      // What the vault actually holds is what gets seized, and what `CreditLine.liquidate` records
+      // and `close_liquidated` later values: read it from the vault, never from our own pledge rows,
+      // which can lag a transaction. They must agree before the line is liquidated; a mismatch means
+      // the vault and credit line are momentarily out of step, which the sync-collateral job repairs.
+      const collateralAsset = onChain.asset;
+      const held = BigInt(await pledgeVaultClient.positionUnits(contractLine, collateralAsset));
+      if (!alreadyLiquidating && held !== BigInt(onChain.pledgedUnits)) {
+        result.skipped++;
+        continue;
       }
 
       const txHashes: string[] = [];
@@ -139,29 +127,30 @@ export async function runCureExpiryJob(
         );
       }
 
-      let totalUnits = 0n;
-      for (const [assetId, assetPledges] of pledgesByAsset) {
-        const [asset] = await db.select().from(schema.asset).where(eq(schema.asset.id, assetId)).limit(1);
-        if (!asset) throw new Error(`asset ${assetId} not found`);
-
-        const units = assetPledges.reduce((sum, p) => sum + decimalStringToScaled(p.units), 0n);
+      // Zero when a previous run already moved it and died before booking: nothing left to send.
+      if (held > 0n) {
         txHashes.push(
           await signAndSubmit(
             signer,
             await pledgeVaultClient.liquidate(
               keeper,
               contractLine,
-              asset.contractC,
-              units,
+              collateralAsset,
+              held,
               lenderAccount.stellarAccount,
             ),
           ),
         );
-        totalUnits += units;
-        for (const pledge of assetPledges) {
-          await db.update(schema.pledge).set({ status: "liquidated" }).where(eq(schema.pledge.id, pledge.id));
-        }
       }
+
+      const pledges = await db
+        .select()
+        .from(schema.pledge)
+        .where(and(eq(schema.pledge.creditLineId, line.id), eq(schema.pledge.status, "active")));
+      for (const pledge of pledges) {
+        await db.update(schema.pledge).set({ status: "liquidated" }).where(eq(schema.pledge.id, pledge.id));
+      }
+      const totalUnits = held;
 
       await db.insert(schema.liquidation).values({
         creditLineId: line.id,
