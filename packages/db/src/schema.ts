@@ -14,6 +14,7 @@ import {
   timestamp,
   jsonb,
   primaryKey,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 const money = (name: string) => numeric(name, { precision: 32, scale: 7 });
@@ -102,17 +103,22 @@ export const partyAccount = pgTable(
 
 // --- Price (defined before credit/margin tables, which reference price_snapshot) ---
 
-export const priceObservation = pgTable("price_observation", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  assetId: uuid("asset_id")
-    .notNull()
-    .references(() => asset.id),
-  source: text("source").notNull(),
-  value: money("value").notNull(),
-  observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
-  signature: text("signature"),
-  stale: boolean("stale").notNull().default(false),
-});
+export const priceObservation = pgTable(
+  "price_observation",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    assetId: uuid("asset_id")
+      .notNull()
+      .references(() => asset.id),
+    source: text("source").notNull(),
+    value: money("value").notNull(),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+    signature: text("signature"),
+    stale: boolean("stale").notNull().default(false),
+  },
+  // A source that has not moved reports the same reading every cycle; one row per reading.
+  (t) => [uniqueIndex("price_observation_asset_source_observed_uq").on(t.assetId, t.source, t.observedAt)],
+);
 
 export const priceSnapshot = pgTable("price_snapshot", {
   id: uuid("id").primaryKey().defaultRandom(),

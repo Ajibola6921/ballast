@@ -22,6 +22,13 @@
       "when": 1791291905716,
       "tag": "0002_tx_intent",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791467354316,
+      "tag": "0003_price_observation_unique",
+      "breakpoints": true
     }
   ]
 }

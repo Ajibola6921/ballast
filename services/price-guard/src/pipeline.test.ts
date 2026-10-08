@@ -57,7 +57,8 @@ function stubRedstone() {
 }
 
 function makeDb() {
-  const values = vi.fn().mockResolvedValue(undefined);
+  // Drizzle's `values()` is awaitable and also chainable with `.onConflictDoNothing()`.
+  const values = vi.fn(() => Object.assign(Promise.resolve(undefined), { onConflictDoNothing: () => Promise.resolve(undefined) }));
   const insert = vi.fn(() => ({ values }));
   return { insert, values };
 }

@@ -89,7 +89,7 @@ export async function runPriceUpdateCycle(
           value: scaledToDecimalString(nav.value),
           observedAt: new Date(nav.ts * 1000),
           stale: false,
-        });
+        }).onConflictDoNothing();
       }
       if (feed) {
         await db.insert(schema.priceObservation).values({
@@ -98,7 +98,7 @@ export async function runPriceUpdateCycle(
           value: scaledToDecimalString(feed.value),
           observedAt: new Date(feed.ts * 1000),
           stale: false,
-        });
+        }).onConflictDoNothing();
       }
 
       if (shadow) {
