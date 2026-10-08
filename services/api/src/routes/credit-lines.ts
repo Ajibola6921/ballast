@@ -84,6 +84,8 @@ export function registerCreditLineRoutes(
     let priceStatus: string | null = null;
     let collateralValue: string | null = null;
     let funded: string | null = null;
+    let undrawn: string | null = null;
+    let claimableInterest: string | null = null;
     let liquidation: {
       closed: boolean;
       debt: string;
@@ -107,6 +109,8 @@ export function registerCreditLineRoutes(
         priceStatus = view.priceStatus;
         collateralValue = BigInt(view.collateralValue).toString();
         funded = BigInt(onChain.funded).toString();
+        undrawn = (BigInt(onChain.funded) - BigInt(onChain.drawn)).toString();
+        claimableInterest = BigInt(await contracts.creditLine.claimableInterest(BigInt(line.contractLineId))).toString();
         if (onChain.status !== "Open") {
           const record = await contracts.creditLine.liquidationRecord(BigInt(line.contractLineId));
           liquidation = {
@@ -140,6 +144,8 @@ export function registerCreditLineRoutes(
       ltvBps,
       marginState,
       funded,
+      undrawn,
+      claimableInterest,
       collateralValue,
       priceStatus,
       liquidation,

@@ -181,6 +181,17 @@ export const api = {
       body: JSON.stringify({ amount: amount.toString() }),
     }),
 
+  /** Lender takes undrawn USDC (incl. repaid principal) or repaid interest back out of a line. */
+  withdraw: (token: string, id: string, kind: "undrawn" | "interest", amount: bigint) =>
+    request<BuiltTx>(`/v1/credit-lines/${id}/withdrawals`, token, {
+      method: "POST",
+      body: JSON.stringify({ kind, amount: amount.toString() }),
+    }),
+
+  /** Lender books a liquidation's outcome and closes the line. */
+  closeLiquidation: (token: string, id: string) =>
+    request<BuiltTx>(`/v1/credit-lines/${id}/close-liquidation`, token, { method: "POST" }),
+
   draw: (token: string, id: string, amount: bigint, to: string) =>
     request<BuiltTx>(`/v1/credit-lines/${id}/draws`, token, {
       method: "POST",
@@ -319,6 +330,18 @@ export interface CreditLineDetail {
   marginState: "Healthy" | "Warning" | "MarginCall" | "Liquidation";
   /** On-chain figures; null until the line has settled on-chain. */
   funded: string | null;
+  /** Principal the lender could withdraw now (funded minus principal out on loan). */
+  undrawn: string | null;
+  /** Interest repaid and not yet withdrawn. */
+  claimableInterest: string | null;
   collateralValue: string | null;
   priceStatus: string | null;
+  /** Present once the line has been liquidated; amounts are 7-decimal scaled strings. */
+  liquidation: {
+    closed: boolean;
+    debt: string;
+    recovered: string;
+    surplus: string;
+    shortfall: string;
+  } | null;
 }

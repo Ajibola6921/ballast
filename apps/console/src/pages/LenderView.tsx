@@ -13,6 +13,7 @@ export function LenderView() {
   const [positions, setPositions] = useState<PositionsResult | null>(null);
   const [details, setDetails] = useState<Record<string, CreditLineDetail>>({});
   const [fundAmounts, setFundAmounts] = useState<Record<string, string>>({});
+  const [withdrawAmounts, setWithdrawAmounts] = useState<Record<string, string>>({});
   const [tx, setTx] = useState<BuiltTx | null>(null);
   const [assets, setAssets] = useState<AssetSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -123,6 +124,86 @@ export function LenderView() {
                     Fund
                   </Button>
                 </div>
+                <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2 sm:col-span-5">
+                  <span className="text-xs uppercase tracking-wider text-fg-dim">
+                    Undrawn{" "}
+                    <span className="text-fg">{d && d.undrawn !== null ? formatScaledBigintString(d.undrawn, d.loanCcy) : "..."}</span>
+                    {" / "}Interest{" "}
+                    <span className="text-fg">
+                      {d && d.claimableInterest !== null ? formatScaledBigintString(d.claimableInterest, d.loanCcy) : "..."}
+                    </span>
+                  </span>
+                  <input
+                    value={withdrawAmounts[line.id] ?? ""}
+                    onChange={(e) => setWithdrawAmounts((prev) => ({ ...prev, [line.id]: e.target.value }))}
+                    placeholder="withdraw amt"
+                    inputMode="decimal"
+                    className="w-28 border border-line bg-bg px-2 py-1 text-xs outline-none focus:border-fg"
+                  />
+                  {(["undrawn", "interest"] as const).map((kind) => (
+                    <Button
+                      key={kind}
+                      disabled={busyId === line.id || !withdrawAmounts[line.id] || !line.contractLineId}
+                      onClick={async () => {
+                        setBusyId(line.id);
+                        setError(null);
+                        try {
+                          setTx(await api.withdraw(session.token, line.id, kind, toScaled(withdrawAmounts[line.id])));
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : "withdraw failed");
+                        } finally {
+                          setBusyId(null);
+                        }
+                      }}
+                    >
+                      Withdraw {kind}
+                    </Button>
+                  ))}
+                </div>
+                {line.status === "liquidating" && (
+                  <div className="flex flex-wrap items-center gap-3 border border-accent p-2 sm:col-span-5">
+                    <p className="flex-1 text-xs leading-relaxed text-fg-dim">
+                      LIQUIDATED. The collateral has been sent to you in kind. Closing books it at the price
+                      confirmed when the breach was flagged. If it is worth more than the debt you pay the
+                      difference to the borrower in USDC in the same transaction.
+                    </p>
+                    <Button
+                      disabled={busyId === line.id}
+                      onClick={async () => {
+                        setBusyId(line.id);
+                        setError(null);
+                        try {
+                          setTx(await api.closeLiquidation(session.token, line.id));
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : "close failed");
+                        } finally {
+                          setBusyId(null);
+                        }
+                      }}
+                    >
+                      Close liquidated line
+                    </Button>
+                  </div>
+                )}
+                {d?.liquidation?.closed && (
+                  <dl className="grid grid-cols-2 gap-px bg-line text-xs sm:col-span-5 sm:grid-cols-4">
+                    {(
+                      [
+                        ["Debt at liquidation", d.liquidation.debt],
+                        ["Collateral value", d.liquidation.recovered],
+                        ["Paid to borrower", d.liquidation.surplus],
+                        ["Shortfall (loss)", d.liquidation.shortfall],
+                      ] as const
+                    ).map(([label, value]) => (
+                      <div key={label} className="bg-bg-raised p-2">
+                        <dt className="uppercase tracking-wider text-fg-dim">{label}</dt>
+                        <dd className={label.startsWith("Shortfall") && BigInt(value) > 0n ? "text-accent" : "text-fg"}>
+                          {formatScaledBigintString(value, d.loanCcy)}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                )}
               </div>
             );
           })}
