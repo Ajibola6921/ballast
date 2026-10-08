@@ -163,6 +163,7 @@ PAYOUT_HOP_SECRET_KEY=$(stellar keys secret payout_hop)
 # Dev cadence: every keeper job each minute (production defaults are 5 minutes / hourly).
 KEEPER_CURE_EXPIRY_CRON="* * * * *"
 KEEPER_REPO_UNWIND_CRON="* * * * *"
+KEEPER_REPO_MARGIN_CRON="* * * * *"
 
 # RWA1 is priced as Etherfuse's real USTRY bond: Etherfuse's price API for the issuer NAV and
 # RedStone's USTRY feed (read from mainnet) as the independent source.

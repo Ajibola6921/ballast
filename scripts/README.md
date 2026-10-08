@@ -62,6 +62,7 @@ scripts/dev-setup.sh testnet   # or `local`
 pnpm dev
 scripts/e2e-services.sh testnet
 scripts/e2e-liquidation.sh testnet
+scripts/e2e-repo-margin.sh testnet
 ```
 
 `deploy.sh` ends by calling `configure-desks.sh`, which configures `ExitDesk` (asset, spread,
@@ -85,12 +86,20 @@ submitted back through `POST /v1/tx/submit`. It runs two scripts from `services/
 - `exit-repo.ts`: an exit-desk quote and its execution; then a repo proposed by the lender,
   accepted by the borrower, and unwound at maturity by `services/keeper` with nobody else signing.
 
-`e2e-liquidation.sh` runs `liquidation.ts`: the borrower draws to ~63% LTV, the mock price drops
-to $0.62, and from there only the services act - `price-guard` publishes, `margin-monitor` records
-the move into `Liquidation`, and `keeper` arms the breach, waits out the cure window, liquidates
-the line and sends the collateral to the lender. It is separate because it moves the price every
-line on the deployment sees: it widens `PriceGuard`'s daily-move band for the drill (a one-step
-38% drop would otherwise halt the price, which is the guard working) and restores both on exit.
+`e2e-liquidation.sh` runs `liquidation.ts`: the borrower draws against healthy collateral, then the
+line's margin thresholds are tightened under its real LTV (real prices do not fall on demand, so the
+price itself is left alone). From there only the services act: `margin-monitor` records the move into
+`Liquidation`, and `keeper` arms the breach, waits out the cure window, liquidates the line and sends
+the collateral to the lender. The lender then closes the line (the contract books the outcome at the
+price it confirmed and pays the borrower the surplus) and withdraws the funding that was never drawn.
+It is separate because the thresholds are shared by every line on the asset; the original ones are
+put back on exit.
+
+`e2e-repo-margin.sh` runs `repo-margin.ts` the same way for a repo: the keeper opens a margin call
+under tightened thresholds, the borrower cures it by adding collateral through the API, a second call is
+left uncured, and after the (shortened) cure window the keeper defaults the trade, giving the lender
+only the units that cover what is owed. It needs `KEEPER_REPO_MARGIN_CRON` set to every minute, which
+`dev-setup.sh` does.
 
 To use the console, import the deploy's `lender` or `borrower` key into Freighter
 (`stellar keys secret lender`), switch Freighter to the same network, and open
