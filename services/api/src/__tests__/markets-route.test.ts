@@ -13,7 +13,7 @@ const config: ApiConfig = {
   sep10WebAuthDomain: "localhost",
   networkPassphrase: "Public Global Stellar Network ; September 2015",
   webhookSecretKey: "00".repeat(32),
-  institutionApiKeys: {},
+  apiKeySecretKey: "00".repeat(32),
   consoleOrigin: "http://localhost:5173",
 };
 

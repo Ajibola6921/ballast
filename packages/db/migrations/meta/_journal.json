@@ -43,6 +43,13 @@
       "when": 1791469196293,
       "tag": "0005_webhook_outbox",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791473923842,
+      "tag": "0006_party_api_key",
+      "breakpoints": true
     }
   ]
 }

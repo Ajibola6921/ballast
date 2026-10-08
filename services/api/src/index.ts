@@ -8,6 +8,7 @@ import { getDb } from "./db.js";
 import { sweepPendingIntents } from "./intents.js";
 import { deliverDue, fanOutRecentEvents } from "./webhooks/outbox.js";
 import { isValidSecretKey } from "./webhooks/secretBox.js";
+import { purgeExpiredNonces } from "./apiKeys.js";
 
 const logger = createLogger("api");
 const config = loadApiConfig();
@@ -33,6 +34,10 @@ setInterval(async () => {
   }
 }, SWEEP_INTERVAL_MS).unref();
 
+setInterval(() => {
+  purgeExpiredNonces(db).catch((err) => logger.error({ err }, "api key nonce purge failed"));
+}, 60_000).unref();
+
 const WEBHOOK_INTERVAL_MS = Number(process.env.API_WEBHOOK_INTERVAL_MS ?? 10_000);
 if (isValidSecretKey(config.webhookSecretKey)) {
   let delivering = false;
@@ -57,6 +62,9 @@ if (isValidSecretKey(config.webhookSecretKey)) {
   }, WEBHOOK_INTERVAL_MS).unref();
 } else {
   logger.warn("WEBHOOK_SECRET_KEY is not set: webhook subscriptions and delivery are disabled");
+}
+if (!isValidSecretKey(config.apiKeySecretKey)) {
+  logger.warn("API_KEY_SECRET_KEY is not set: institution API keys cannot be created or used");
 }
 
 app.addHook("onResponse", async (request, reply) => {

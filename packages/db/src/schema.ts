@@ -353,6 +353,42 @@ export const chainEvent = pgTable(
   (t) => [uniqueIndex("chain_event_event_id_uq").on(t.eventId)],
 );
 
+// --- Institution API keys ---
+
+/** A party's API credential for the signed-request auth path. `keyId` is the public half sent in
+ * `x-api-key`; the signing secret is stored encrypted and shown once, at creation. A key acts as
+ * `stellarAccount` (the session account that created it). Revoked keys stay for the audit trail. */
+export const partyApiKey = pgTable(
+  "party_api_key",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    partyId: uuid("party_id")
+      .notNull()
+      .references(() => party.id),
+    stellarAccount: text("stellar_account").notNull(),
+    keyId: text("key_id").notNull(),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    label: text("label"),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("party_api_key_key_id_uq").on(t.keyId)],
+);
+
+/** Nonces seen on signed requests, so a captured request cannot be replayed inside the
+ * timestamp window. Rows older than the window are purged. */
+export const apiKeyNonce = pgTable(
+  "api_key_nonce",
+  {
+    keyId: text("key_id").notNull(),
+    nonce: text("nonce").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.keyId, t.nonce] })],
+);
+
 // --- Webhooks (outbox) ---
 
 /** A party's registered webhook endpoint. `secretCiphertext` is the signing secret, encrypted

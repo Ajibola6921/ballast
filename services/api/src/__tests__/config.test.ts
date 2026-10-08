@@ -13,6 +13,7 @@ const PRODUCTION_REQUIRED_ENV = {
   SEP10_SERVER_SECRET: "SBQWY3JPJKSAKQVQ7Q7TSPZCU5R5PGSWKZ35RQ7Q7TSPZCU5R5PGSWKZ",
   JWT_SIGNING_SECRET: "a-real-jwt-secret",
   WEBHOOK_SECRET_KEY: "ab".repeat(32),
+  API_KEY_SECRET_KEY: "cd".repeat(32),
   CONSOLE_ORIGIN: "https://console.example.com",
 };
 
@@ -22,6 +23,7 @@ describe("loadApiConfig", () => {
     expect(config.sep10ServerSecret).toBe(PRODUCTION_REQUIRED_ENV.SEP10_SERVER_SECRET);
     expect(config.jwtSigningSecret).toBe(PRODUCTION_REQUIRED_ENV.JWT_SIGNING_SECRET);
     expect(config.webhookSecretKey).toBe(PRODUCTION_REQUIRED_ENV.WEBHOOK_SECRET_KEY);
+    expect(config.apiKeySecretKey).toBe(PRODUCTION_REQUIRED_ENV.API_KEY_SECRET_KEY);
     expect(config.consoleOrigin).toBe(PRODUCTION_REQUIRED_ENV.CONSOLE_ORIGIN);
   });
 
@@ -32,8 +34,13 @@ describe("loadApiConfig", () => {
 
   it("throws listing every missing required secret at once, not just the first", () => {
     expect(() => loadApiConfig({ ...NETWORK_ENV, NODE_ENV: "production" })).toThrowError(
-      /SEP10_SERVER_SECRET.*JWT_SIGNING_SECRET.*WEBHOOK_SECRET_KEY.*CONSOLE_ORIGIN/s,
+      /SEP10_SERVER_SECRET.*JWT_SIGNING_SECRET.*WEBHOOK_SECRET_KEY.*API_KEY_SECRET_KEY.*CONSOLE_ORIGIN/s,
     );
+  });
+
+  it("rejects an encryption key that is not 32 bytes of hex", () => {
+    expect(() => loadApiConfig({ ...NETWORK_ENV, API_KEY_SECRET_KEY: "too-short" })).toThrowError(/API_KEY_SECRET_KEY/);
+    expect(() => loadApiConfig({ ...NETWORK_ENV, WEBHOOK_SECRET_KEY: "zz".repeat(32) })).toThrowError(/WEBHOOK_SECRET_KEY/);
   });
 
   it("stays permissive outside production even with every secret unset", () => {

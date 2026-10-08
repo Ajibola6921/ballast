@@ -1,14 +1,18 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { createHmac, timingSafeEqual } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { schema, type Database } from "@ballast/db";
 import type { ApiConfig } from "./config.js";
 import { verifySessionToken } from "./session-token.js";
+import { RateWindow, verifyApiKeyRequest } from "./apiKeys.js";
 
 declare module "fastify" {
   interface FastifyRequest {
     partyId: string;
     stellarAccount: string | null;
+    /** Raw request body bytes, kept so signed-request auth hashes exactly what was sent. */
+    rawBody?: Buffer;
+    /** How the caller authenticated; key-management routes accept only a session. */
+    authMethod?: "session" | "api_key";
   }
   // `@fastify/rate-limit` augments `FastifyContextConfig` with its own `rateLimit` field, which
   // turns it from an effectively-open type into a closed one — route configs using this app's
@@ -31,13 +35,18 @@ declare module "fastify" {
  * The JWT is expected to carry a `sub` claim equal to the caller's Stellar G-address, matching
  * SEP-10 JWT convention; we then resolve `partyId` from the `party_account` table.
  *
- * The institution path (`x-api-key` + `x-signature`) is verified against a per-party secret
- * from `ApiConfig.institutionApiKeys` (env-var JSON stub — see config.ts for the gap re: not
- * reading a real `party` table column/secret store yet). The signature covers
- * `${x-timestamp}.${raw JSON body}`, and a required `x-timestamp` header (Unix seconds, checked
- * against a ±300s tolerance) prevents replaying a captured request indefinitely.
+ * The institution path (`x-api-key` + `x-timestamp` + `x-nonce` + `x-signature`) is verified in
+ * `apiKeys.ts` against a key stored in `party_api_key`: the signature covers the method, path,
+ * query and a hash of the raw body, the timestamp bounds replay and each nonce is single use.
+ * Keys are created, listed and revoked by the party through `routes/api-keys.ts`.
  */
+const FAILURES_PER_MINUTE = 30;
+const REQUESTS_PER_KEY_PER_MINUTE = 1000;
+
 export function buildAuthHook(config: ApiConfig, db: Database) {
+  const failures = new RateWindow(FAILURES_PER_MINUTE, 60_000);
+  const perKey = new RateWindow(REQUESTS_PER_KEY_PER_MINUTE, 60_000);
+  const failureCount = (ip: string) => failures.count(ip);
   return async function authHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     // Routes registered with `{ config: { public: true } }` (health check, public asset/price
     // listings) skip auth entirely.
@@ -51,32 +60,29 @@ export function buildAuthHook(config: ApiConfig, db: Database) {
     const timestampHeader = request.headers["x-timestamp"];
 
     if (typeof apiKey === "string" && typeof signature === "string") {
-      const institution = config.institutionApiKeys[apiKey];
-      if (!institution) {
-        return reply.code(401).send({ error: "unknown api key" });
+      // Bound the cost of guessing: too many failed attempts from one address are refused outright.
+      if (failureCount(request.ip) > FAILURES_PER_MINUTE) {
+        return reply.code(429).send({ error: "too many failed authentication attempts" });
       }
-
-      if (typeof timestampHeader !== "string" || !/^\d+$/.test(timestampHeader)) {
-        return reply.code(400).send({ error: "missing or invalid x-timestamp header" });
+      const result = await verifyApiKeyRequest(db, config.apiKeySecretKey, {
+        keyId: apiKey,
+        signature,
+        timestamp: typeof timestampHeader === "string" ? timestampHeader : undefined,
+        nonce: typeof request.headers["x-nonce"] === "string" ? request.headers["x-nonce"] : undefined,
+        method: request.method,
+        url: request.url,
+        rawBody: request.rawBody ?? Buffer.alloc(0),
+      });
+      if (!result.ok) {
+        failures.hit(request.ip);
+        return reply.code(401).send({ error: `api key authentication failed: ${result.reason}` });
       }
-      const timestamp = Number(timestampHeader);
-      const skewS = Math.abs(Date.now() / 1000 - timestamp);
-      if (skewS > 300) {
-        return reply.code(401).send({ error: "stale or future x-timestamp" });
+      if (!perKey.hit(result.keyId)) {
+        return reply.code(429).send({ error: "api key rate limit exceeded" });
       }
-
-      const expected = createHmac("sha256", institution.hmacSecret)
-        .update(`${timestampHeader}.${JSON.stringify(request.body ?? {})}`)
-        .digest("hex");
-      const expectedBuf = Buffer.from(expected, "hex");
-      const givenBuf = Buffer.from(signature, "hex");
-      const valid =
-        expectedBuf.length === givenBuf.length && timingSafeEqual(expectedBuf, givenBuf);
-      if (!valid) {
-        return reply.code(401).send({ error: "invalid signature" });
-      }
-      request.partyId = institution.partyId;
-      request.stellarAccount = institution.stellarAccount;
+      request.partyId = result.partyId;
+      request.stellarAccount = result.stellarAccount;
+      request.authMethod = "api_key";
       return;
     }
 
@@ -98,6 +104,7 @@ export function buildAuthHook(config: ApiConfig, db: Database) {
       }
       request.partyId = account.partyId;
       request.stellarAccount = stellarAccount;
+      request.authMethod = "session";
       return;
     }
 

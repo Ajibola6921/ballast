@@ -13,6 +13,7 @@ import { registerDevAuthRoutes } from "./routes/dev-auth.js";
 import { registerAssetRoutes } from "./routes/assets.js";
 import { registerMarketRoutes } from "./routes/markets.js";
 import { registerWebhookRoutes } from "./routes/webhooks.js";
+import { registerApiKeyRoutes } from "./routes/api-keys.js";
 import { registerCreditLineRoutes } from "./routes/credit-lines.js";
 import { registerExitRoutes } from "./routes/exit.js";
 import { registerRepoRoutes } from "./routes/repo.js";
@@ -44,11 +45,24 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   // Registered before auth: this is a pure JSON API (no HTML, so helmet's defaults are fine
   // as-is) that the console browser app calls cross-origin, so CORS must be locked to that one
   // known origin rather than left as `*`.
+  // Keep the raw bytes next to the parsed JSON: signed-request auth hashes exactly what was sent,
+  // not a re-serialised copy that could differ in whitespace or key order.
+  app.addContentTypeParser("application/json", { parseAs: "buffer" }, (request, body, done) => {
+    request.rawBody = body as Buffer;
+    if ((body as Buffer).length === 0) return done(null, undefined);
+    try {
+      done(null, JSON.parse((body as Buffer).toString("utf8")));
+    } catch (err) {
+      (err as Error & { statusCode?: number }).statusCode = 400;
+      done(err as Error, undefined);
+    }
+  });
+
   void app.register(helmet);
   void app.register(cors, { origin: config.consoleOrigin });
-  // Cheap differentiation using the existing `x-api-key` institution-auth header: authenticated
-  // institutions get a much higher ceiling than anonymous/JWT-bearer callers. `/healthz` is
-  // exempted below via its own route config.
+  // Per-address ceiling: callers presenting an `x-api-key` get a higher one. A bogus key buys no
+  // more than failed attempts, which `auth.ts` caps separately, and each valid key also has its own
+  // per-key limit there. `/healthz` is exempted below via its own route config.
   void app.register(rateLimit, {
     max: (req: { headers: Record<string, unknown> }) => (req.headers["x-api-key"] ? 1000 : 100),
     timeWindow: "1 minute",
@@ -80,6 +94,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   registerAssetRoutes(app, db);
   registerMarketRoutes(app, db);
   registerWebhookRoutes(app, db, config);
+  registerApiKeyRoutes(app, db, config);
   registerCreditLineRoutes(app, db, contracts, chain);
   registerExitRoutes(app, db, contracts, chain);
   registerRepoRoutes(app, db, contracts, chain);

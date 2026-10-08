@@ -26,13 +26,9 @@ export interface ApiConfig {
   /** 32-byte key (64 hex chars) that encrypts webhook signing secrets at rest. Webhook
    * subscriptions are refused (503) while it is unset. */
   webhookSecretKey: string;
-  /**
-   * Institution API-key auth (PRD §9 "API key + HMAC for institutions"). Stubbed as an env var
-   * map of `apiKey -> { partyId, stellarAccount, hmacSecret }` JSON-encoded, rather than reading
-   * a `party` table column — see auth.ts for the tradeoff. Follow-up: move this into the `party`
-   * table (e.g. a `party_api_key` table) once institution onboarding is a real flow.
-   */
-  institutionApiKeys: Record<string, { partyId: string; stellarAccount: string; hmacSecret: string }>;
+  /** 32-byte key (64 hex chars) that encrypts institution API-key signing secrets at rest. API
+   * keys cannot be created or used while it is unset. */
+  apiKeySecretKey: string;
   /** Origin allowed to call this API from a browser (the console app). Passed straight to
    * `@fastify/cors`'s `origin` option — never `*`. */
   consoleOrigin: string;
@@ -50,19 +46,11 @@ const PRODUCTION_REQUIRED = [
   "SEP10_SERVER_SECRET",
   "JWT_SIGNING_SECRET",
   "WEBHOOK_SECRET_KEY",
+  "API_KEY_SECRET_KEY",
   "CONSOLE_ORIGIN",
 ] as const;
 
 export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
-  let institutionApiKeys: ApiConfig["institutionApiKeys"] = {};
-  if (env.INSTITUTION_API_KEYS) {
-    try {
-      institutionApiKeys = JSON.parse(env.INSTITUTION_API_KEYS);
-    } catch {
-      throw new Error("services/api: INSTITUTION_API_KEYS is not valid JSON");
-    }
-  }
-
   if (env.NODE_ENV === "production") {
     const missing = PRODUCTION_REQUIRED.filter((key) => !env[key]);
     if (missing.length > 0) {
@@ -70,8 +58,10 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     }
   }
 
-  if (env.WEBHOOK_SECRET_KEY && !/^[0-9a-fA-F]{64}$/.test(env.WEBHOOK_SECRET_KEY)) {
-    throw new Error("services/api: WEBHOOK_SECRET_KEY must be 32 bytes as 64 hex characters");
+  for (const name of ["WEBHOOK_SECRET_KEY", "API_KEY_SECRET_KEY"] as const) {
+    if (env[name] && !/^[0-9a-fA-F]{64}$/.test(env[name]!)) {
+      throw new Error(`services/api: ${name} must be 32 bytes as 64 hex characters`);
+    }
   }
 
   return {
@@ -82,7 +72,7 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     sep10WebAuthDomain: env.SEP10_WEB_AUTH_DOMAIN ?? env.SEP10_HOME_DOMAIN ?? "localhost",
     networkPassphrase: loadNetworkConfig(env).networkPassphrase,
     webhookSecretKey: env.WEBHOOK_SECRET_KEY ?? "",
-    institutionApiKeys,
+    apiKeySecretKey: env.API_KEY_SECRET_KEY ?? "",
     consoleOrigin: env.CONSOLE_ORIGIN ?? "http://localhost:5173",
   };
 }

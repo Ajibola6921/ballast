@@ -211,7 +211,7 @@ describe("POST /v1/tx/submit", () => {
     sep10WebAuthDomain: "localhost",
     networkPassphrase: "Test SDF Network ; September 2015",
     webhookSecretKey: "00".repeat(32),
-    institutionApiKeys: {},
+    apiKeySecretKey: "00".repeat(32),
     consoleOrigin: "http://localhost:5173",
   };
   const ACCOUNT = "GCALLERACCOUNT";
