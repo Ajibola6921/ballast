@@ -89,6 +89,11 @@ All run with `pnpm dev` up and the services acting on their own.
   defaulted the trade: the lender received 46.4486037 RWA1 (what covers the debt) and the borrower got
   78.5513963 RWA1 back.
 
+Also checked live against the running stack: `payout-hop` and `issuer-gateway` answer 401 without the
+internal token and listen only on 127.0.0.1; `payout-hop` answers 403 for a destination that is not an
+approved anchor, an amount over the cap and a different USDC issuer. An actual forward to an anchor was
+not run (the payout operator account holds no TUSD on this deployment).
+
 Not exercised on a live network: the shortfall case (collateral worth less than the debt) needs a real
 price fall to reach, so it is covered by contract unit tests only; issuer-lien and custodian-lien
 custody modes need an issuer to place the lien; the anchor payout hop is not wired into the exit flow.
