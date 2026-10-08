@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { isAllowed, isConnected } from "@stellar/freighter-api";
 import { useAuth } from "../lib/auth.tsx";
 import { Panel } from "../components/Panel.tsx";
@@ -77,6 +77,13 @@ export function Login() {
             {error && <p className="text-xs text-accent">ERROR: {error}</p>}
           </div>
         </Panel>
+
+        <Link
+          to="/markets"
+          className="mt-4 block border border-line p-2 text-center text-xs uppercase tracking-[0.1em] text-fg-dim hover:text-fg"
+        >
+          View live prices &gt;&gt;&gt;
+        </Link>
 
         <p className="mt-4 border border-line p-2 text-xs leading-relaxed text-fg-dim">
           Authentication is real SEP-10: Ballast issues a challenge transaction, Freighter signs it

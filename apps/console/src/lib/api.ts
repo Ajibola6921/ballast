@@ -36,7 +36,37 @@ export interface TokenResult {
   partyId: string;
 }
 
+export interface MarketReading {
+  value: string;
+  observedAt: string;
+  ageS: number;
+}
+
+export interface Market {
+  code: string;
+  issuer: string;
+  issuerCode: string;
+  contract: string;
+  ccy: string;
+  priceBandBps: number;
+  /** Null until the PriceGuard contract has published a price for this asset on-chain. */
+  guarded: { value: string; status: string; asOf: string; ageS: number } | null;
+  sources: { issuerNav: MarketReading | null; redstone: MarketReading | null };
+  sourceCount: number;
+  divergenceBps: number | null;
+}
+
+export interface MarketsResult {
+  network: string;
+  priceGuardContract: string | null;
+  generatedAt: string;
+  markets: Market[];
+}
+
 export const api = {
+  /** Public, no session: the live price state of every asset. */
+  markets: () => request<MarketsResult>("/v1/public/markets", null),
+
   /** SEP-10 step 1: get a challenge transaction (base64 XDR) to sign with `account`'s own key. */
   challenge: (account: string) =>
     request<ChallengeResult>("/v1/auth/challenge", null, {
