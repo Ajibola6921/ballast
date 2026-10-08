@@ -4,6 +4,7 @@
  * both services' own `submit.ts`; this is the one copy.
  */
 import { TransactionBuilder, rpc } from "@stellar/stellar-sdk";
+import { withRpcRetry } from "@ballast/network-config";
 import type { SubmitResult } from "./types.js";
 
 /**
@@ -20,14 +21,15 @@ export async function submitSignedTx(
   const server = new rpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith("http://") });
   const tx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
 
-  const sendResult = await server.sendTransaction(tx);
+  // Repeating a send is safe: the network answers a transaction it already has with the original hash.
+  const sendResult = await withRpcRetry(() => server.sendTransaction(tx));
   if (sendResult.status === "ERROR") {
     throw new Error(`submitSignedTx: send failed: ${JSON.stringify(sendResult.errorResult)}`);
   }
 
   const hash = sendResult.hash;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const got = await server.getTransaction(hash);
+    const got = await withRpcRetry(() => server.getTransaction(hash));
     if (got.status === "SUCCESS") {
       return { hash, status: got.status };
     }

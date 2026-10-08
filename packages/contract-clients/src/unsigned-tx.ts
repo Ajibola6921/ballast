@@ -7,7 +7,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { rpc } from "@stellar/stellar-sdk";
-import type { NetworkConfig } from "@ballast/network-config";
+import { withRpcRetry, type NetworkConfig } from "@ballast/network-config";
 import { normalizeContractValue } from "./scval.js";
 
 /**
@@ -62,7 +62,7 @@ export async function buildUnsignedTx(
   scArgs: xdr.ScVal[],
 ): Promise<string> {
   const server = new rpc.Server(config.rpcUrl, { allowHttp: config.rpcUrl.startsWith("http://") });
-  const sourceAccount = await server.getAccount(sourcePublicKey);
+  const sourceAccount = await withRpcRetry(() => server.getAccount(sourcePublicKey));
 
   const tx = new TransactionBuilder(sourceAccount, {
     fee: BASE_FEE,
@@ -76,7 +76,7 @@ export async function buildUnsignedTx(
 
   // Simulates the invocation and attaches the resulting Soroban resource footprint/fee so the
   // envelope is submittable as-is once signed.
-  const prepared = await server.prepareTransaction(tx);
+  const prepared = await withRpcRetry(() => server.prepareTransaction(tx));
   return prepared.toXDR();
 }
 
@@ -106,7 +106,7 @@ export async function simulateRead<T = unknown>(
     .setTimeout(30)
     .build();
 
-  const sim = await server.simulateTransaction(tx);
+  const sim = await withRpcRetry(() => server.simulateTransaction(tx));
 
   if (rpc.Api.isSimulationError(sim)) {
     throw new Error(`contract-clients: simulation of "${method}" failed: ${sim.error}`);

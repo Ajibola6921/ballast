@@ -80,3 +80,5 @@ export function requireContractId(config: NetworkConfig, key: keyof ContractIds)
   }
   return id;
 }
+export * from "./internalAuth.js";
+export * from "./retry.js";
