@@ -2,7 +2,7 @@ import cron from "node-cron";
 import { createDatabase, schema } from "@ballast/db";
 import { eq } from "drizzle-orm";
 import { loadNetworkConfig, requireContractId } from "@ballast/network-config";
-import { createLogger } from "@ballast/observability";
+import { checkOperatorBalance, createConsoleAlerter, createLogger } from "@ballast/observability";
 import { PriceGuardClient } from "@ballast/contract-clients";
 import type { AssetConfig } from "@ballast/domain-types";
 import { createOperatorSigner } from "@ballast/operator-signing";
@@ -10,6 +10,7 @@ import { runPriceUpdateCycle } from "./pipeline.js";
 import { decimalStringToScaled } from "./scaled.js";
 
 const logger = createLogger("price-guard");
+const alerter = createConsoleAlerter("price-guard");
 const db = createDatabase();
 const network = loadNetworkConfig();
 
@@ -58,5 +59,17 @@ cron.schedule(CRON_EXPR, async () => {
     logger.error({ err }, "price-guard: cycle failed");
   }
 });
+
+// The publisher pays the fee on every price it pushes; a dry account freezes the on-chain price
+// and, once it goes stale, every draw with it. Checked every 30 minutes (not in shadow mode, where
+// nothing is sent on-chain).
+if (signer) {
+  const checkBalance = () =>
+    checkOperatorBalance(alerter, { horizonUrl: network.horizonUrl, account: signer.publicKey(), label: "price-publisher" }).catch(
+      (err) => logger.error({ err }, "price-guard: balance check failed"),
+    );
+  cron.schedule("*/30 * * * *", checkBalance);
+  void checkBalance();
+}
 
 logger.info({ cron: CRON_EXPR, shadow }, "price-guard service started");

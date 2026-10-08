@@ -1,7 +1,7 @@
 import cron from "node-cron";
 import { createDatabase } from "@ballast/db";
 import { loadNetworkConfig, requireContractId } from "@ballast/network-config";
-import { createLogger } from "@ballast/observability";
+import { checkOperatorBalance, createConsoleAlerter, createLogger } from "@ballast/observability";
 import { CreditLineClient, PledgeVaultClient, RepoDvpClient } from "@ballast/contract-clients";
 import { createOperatorSigner } from "@ballast/operator-signing";
 import { runRepoUnwindJob } from "./jobs/repoUnwind.js";
@@ -12,6 +12,7 @@ import { runSyncCollateralJob } from "./jobs/syncCollateral.js";
 import type { JobResult } from "./jobs/types.js";
 
 const logger = createLogger("keeper");
+const alerter = createConsoleAlerter("keeper");
 const db = createDatabase();
 const network = loadNetworkConfig();
 const signer = await createOperatorSigner("keeper", network.networkPassphrase);
@@ -59,6 +60,9 @@ async function execute(name: string, fn: () => Promise<JobResult>): Promise<void
 // checkpoints hourly. All configurable via env.
 const REPO_UNWIND_CRON = process.env.KEEPER_REPO_UNWIND_CRON ?? "*/5 * * * *";
 const REPO_MARGIN_CRON = process.env.KEEPER_REPO_MARGIN_CRON ?? "*/5 * * * *";
+// The keeper pays the fee on every margin call, liquidation, unwind and sync: if its account runs
+// dry they all stop, so it is checked hourly.
+const BALANCE_CRON = process.env.KEEPER_BALANCE_CRON ?? "7 * * * *";
 const CURE_EXPIRY_CRON = process.env.KEEPER_CURE_EXPIRY_CRON ?? "*/5 * * * *";
 const INTEREST_ACCRUAL_CRON = process.env.KEEPER_INTEREST_ACCRUAL_CRON ?? "0 * * * *";
 // Every minute: a pledge only counts toward a line's LTV (and so only unlocks a draw) once this
@@ -67,6 +71,11 @@ const SYNC_COLLATERAL_CRON = process.env.KEEPER_SYNC_COLLATERAL_CRON ?? "* * * *
 
 cron.schedule(REPO_UNWIND_CRON, () => runJob("repo-unwind", () => runRepoUnwindJob(db, repoDvpClient, signer)));
 cron.schedule(REPO_MARGIN_CRON, () => runJob("repo-margin", () => runRepoMarginJob(db, repoDvpClient, signer)));
+cron.schedule(BALANCE_CRON, () => {
+  checkOperatorBalance(alerter, { horizonUrl: network.horizonUrl, account: signer.publicKey(), label: "keeper" }).catch((err) =>
+    logger.error({ err }, "keeper: balance check failed"),
+  );
+});
 cron.schedule(CURE_EXPIRY_CRON, () =>
   runJob("cure-expiry", () => runCureExpiryJob(db, creditLineClient, pledgeVaultClient, signer)),
 );
