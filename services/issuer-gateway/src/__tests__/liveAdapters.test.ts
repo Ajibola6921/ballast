@@ -182,18 +182,13 @@ describe("live issuer adapters: SEP-8 approval-server protocol mapping", () => {
   });
 });
 
-describe("registry.getAdapter with ISSUER_GATEWAY_MODE=live", () => {
-  it("constructs live adapters from env and resolves them by issuer code", async () => {
+describe("registry.getAdapter", () => {
+  it("constructs the requested issuer's adapter from env and resolves it by issuer code", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(200, { approved: true, ref: "r1" })));
 
     const env = {
-      ISSUER_GATEWAY_MODE: "live",
       SPIKO_API_BASE_URL: "https://api.spiko.example",
       SPIKO_API_KEY: "spiko-key",
-      ETHERFUSE_API_BASE_URL: "https://api.etherfuse.example",
-      ETHERFUSE_API_KEY: "etherfuse-key",
-      FRANKLIN_API_BASE_URL: "https://api.franklin.example",
-      FRANKLIN_API_KEY: "franklin-key",
     } as unknown as NodeJS.ProcessEnv;
 
     const adapter = getAdapter("spiko", env);
@@ -204,13 +199,16 @@ describe("registry.getAdapter with ISSUER_GATEWAY_MODE=live", () => {
     });
   });
 
-  it("throws a clear error when live config is missing", () => {
-    const env = { ISSUER_GATEWAY_MODE: "live" } as unknown as NodeJS.ProcessEnv;
-    expect(() => getAdapter("spiko", env)).toThrow(/missing required config/);
+  it("does not require other issuers to be configured", () => {
+    const env = { ETHERFUSE_API_BASE_URL: "https://e.example", ETHERFUSE_API_KEY: "k" } as unknown as NodeJS.ProcessEnv;
+    expect(getAdapter("etherfuse", env)).toBeInstanceOf(EtherfuseAdapter);
   });
 
-  it("still throws for any mode other than mock/live", () => {
-    const env = { ISSUER_GATEWAY_MODE: "staging" } as unknown as NodeJS.ProcessEnv;
-    expect(() => getAdapter("spiko", env)).toThrow(/not implemented/);
+  it("throws a clear error rather than approving when an issuer is not configured", () => {
+    expect(() => getAdapter("spiko", {} as NodeJS.ProcessEnv)).toThrow(/missing required config/);
+  });
+
+  it("throws for an unknown issuer code", () => {
+    expect(() => getAdapter("nobody", {} as NodeJS.ProcessEnv)).toThrow(/no adapter registered/);
   });
 });

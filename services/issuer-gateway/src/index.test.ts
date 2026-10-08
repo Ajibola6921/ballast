@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./index.js";
 
 /** Minimal fake of the slice of `Database` the server touches: `db.insert(...).values(...)`. */
@@ -16,7 +16,42 @@ function fakeDb() {
   return { db, auditRows };
 }
 
-describe("issuer-gateway internal endpoints (mock adapters, ISSUER_GATEWAY_MODE=mock)", () => {
+/**
+ * The endpoints run the real adapters; only the issuer's HTTP side is stubbed, with the response
+ * shapes the adapters document. (No issuer publishes this back-office API, so these shapes are the
+ * contract the adapters expect — not a recording of a real service.)
+ */
+function stubIssuerHttp() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: { method?: string }) => {
+      const json = (body: unknown, status = 200) =>
+        new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+      if (url.includes("/sep8")) return json({ status: "success", tx: "AAAA" });
+      if (url.endsWith("/v1/authorizations")) return json({ approved: true, ref: "auth-1" });
+      if (url.endsWith("/v1/liens") && init?.method === "POST") return json({ lienRef: "lien-1" });
+      if (url.includes("/v1/liens/")) return new Response(null, { status: 204 });
+      if (url.endsWith("/v1/redemptions")) {
+        return json({ redemptionRef: "redeem-1", expectedSettlementAt: Math.floor(Date.now() / 1000) + 86_400 });
+      }
+      return json({ error: "unexpected request" }, 500);
+    }),
+  );
+}
+
+beforeEach(() => {
+  for (const issuer of ["SPIKO", "ETHERFUSE", "FRANKLIN"]) {
+    vi.stubEnv(`${issuer}_API_BASE_URL`, `https://api.${issuer.toLowerCase()}.example`);
+    vi.stubEnv(`${issuer}_API_KEY`, "test-key");
+  }
+  stubIssuerHttp();
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
+
+describe("issuer-gateway internal endpoints", () => {
   it("POST /internal/issuers/spiko/authorize", async () => {
     const { db, auditRows } = fakeDb();
     const app = buildServer(db);
@@ -94,6 +129,20 @@ describe("issuer-gateway internal endpoints (mock adapters, ISSUER_GATEWAY_MODE=
     expect(body).toMatchObject({ redemptionRef: expect.any(String), expectedSettlementAt: expect.any(Number) });
     expect(body.expectedSettlementAt).toBeGreaterThan(Math.floor(Date.now() / 1000));
     expect(auditRows[0]).toMatchObject({ actor: "issuer-gateway", action: "issuer.redeem" });
+  });
+
+  it("returns an error, not an approval, for an issuer whose back-office is not configured", async () => {
+    vi.stubEnv("SPIKO_API_BASE_URL", "");
+    const { db } = fakeDb();
+    const app = buildServer(db);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/internal/issuers/spiko/authorize",
+      payload: { assetCode: "EUTBL", holderAddress: "GHOLDER" },
+    });
+
+    expect(res.statusCode).toBe(500);
   });
 
   it("rejects an unknown issuer code with a clear error rather than a silent default", async () => {
