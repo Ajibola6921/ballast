@@ -29,6 +29,13 @@
       "when": 1791467354316,
       "tag": "0003_price_observation_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791469103249,
+      "tag": "0004_chain_event_event_id",
+      "breakpoints": true
     }
   ]
 }

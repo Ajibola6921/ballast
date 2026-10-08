@@ -40,6 +40,28 @@ export interface RpcClient {
 }
 
 /**
+ * Retries a flaky RPC call with exponential backoff. Public RPC endpoints drop connections and
+ * rate-limit; one failed call should not abandon a whole poll when the next attempt would work.
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  { attempts = 4, baseDelayMs = 500 }: { attempts?: number; baseDelayMs?: number } = {},
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, baseDelayMs * 2 ** attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/**
  * Wraps `rpc.Server` (the SDK's Soroban RPC client, exposing the JSON-RPC `getEvents` and
  * `getLatestLedger` methods per https://developers.stellar.org/docs/data/rpc). Only the subset
  * this service needs is surfaced through `RpcClient`.
@@ -54,8 +76,10 @@ export function createRpcClient(rpcUrl: string): RpcClient {
         contractIds: f.contractIds,
         topics: f.topics,
       }));
-      const response = await server.getEvents(
-        cursor ? { cursor, filters: rpcFilters, limit } : { startLedger, filters: rpcFilters, limit },
+      const response = await withRetry(() =>
+        server.getEvents(
+          cursor ? { cursor, filters: rpcFilters, limit } : { startLedger, filters: rpcFilters, limit },
+        ),
       );
 
       return {
@@ -72,7 +96,7 @@ export function createRpcClient(rpcUrl: string): RpcClient {
     },
 
     async getLatestLedger() {
-      const result = await server.getLatestLedger();
+      const result = await withRetry(() => server.getLatestLedger());
       return { sequence: result.sequence };
     },
   };

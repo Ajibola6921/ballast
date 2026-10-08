@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { pollOnce } from "./poller.js";
-import type { RpcClient } from "./rpc.js";
+import { withRetry, type RpcClient } from "./rpc.js";
 
 /** Minimal fake of the slice of `Database` (drizzle) that `pollOnce` touches. */
 function fakeDb(opts: { lastLedger: number | null; inserted: unknown[] }) {
@@ -12,7 +12,7 @@ function fakeDb(opts: { lastLedger: number | null; inserted: unknown[] }) {
     insert: () => ({
       values: (rows: unknown[]) => {
         opts.inserted.push(...rows);
-        return Promise.resolve();
+        return Object.assign(Promise.resolve(), { onConflictDoNothing: () => Promise.resolve() });
       },
     }),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -69,6 +69,7 @@ describe("pollOnce", () => {
       latestLedger: 4300,
       events: [
         {
+          id: "0000004201-0000000001",
           ledger: 4201,
           txHash: "deadbeef",
           contractId: "CCONTRACT1",
@@ -87,7 +88,9 @@ describe("pollOnce", () => {
     expect(result.insertedCount).toBe(1);
     expect(inserted).toHaveLength(1);
 
-    const row = inserted[0];
+    const row = inserted[0] as (typeof inserted)[number] & { eventId: string };
+    // The RPC's event id is what makes re-ingesting the same range a no-op.
+    expect(row.eventId).toBe("0000004201-0000000001");
     expect(row.ledger).toBe(4201);
     expect(row.txHash).toBe("deadbeef");
     expect(row.contract).toBe("CCONTRACT1");
@@ -96,5 +99,25 @@ describe("pollOnce", () => {
     JSON.stringify(row.data);
     expect((row.data as { value: string }).value).toBe("1000000");
     expect((row.data as { topics: number[] }).topics).toEqual([42]);
+  });
+});
+
+describe("withRetry", () => {
+  it("returns the first successful result after transient failures", async () => {
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("socket hang up"))
+      .mockRejectedValueOnce(new Error("429"))
+      .mockResolvedValue("ok");
+
+    await expect(withRetry(fn, { baseDelayMs: 1 })).resolves.toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it("gives up after the configured attempts and rethrows the last error", async () => {
+    const fn = vi.fn().mockRejectedValue(new Error("rpc down"));
+
+    await expect(withRetry(fn, { attempts: 3, baseDelayMs: 1 })).rejects.toThrow("rpc down");
+    expect(fn).toHaveBeenCalledTimes(3);
   });
 });

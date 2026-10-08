@@ -92,6 +92,7 @@ export async function pollOnce(
   if (events.length > 0) {
     await db.insert(schema.chainEvent).values(
       events.map((event) => ({
+        eventId: event.id ?? null,
         ledger: event.ledger,
         txHash: event.txHash,
         contract: event.contractId,
@@ -101,7 +102,7 @@ export async function pollOnce(
           value: scValToNative(event.value),
         }),
       })),
-    );
+    ).onConflictDoNothing();
   }
 
   metrics.increment("indexer.events_ingested", { count: String(events.length) });

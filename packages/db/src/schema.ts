@@ -336,15 +336,22 @@ export const txIntent = pgTable("tx_intent", {
   settledAt: timestamp("settled_at", { withTimezone: true }),
 });
 
-export const chainEvent = pgTable("chain_event", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  ledger: integer("ledger").notNull(),
-  txHash: text("tx_hash").notNull(),
-  contract: text("contract").notNull(),
-  topic: text("topic").notNull(),
-  data: jsonb("data"),
-  ingestedAt: timestamp("ingested_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const chainEvent = pgTable(
+  "chain_event",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** The RPC's own unique id for the event; makes re-ingesting a ledger range idempotent. Null on
+     * rows ingested before this column existed. */
+    eventId: text("event_id"),
+    ledger: integer("ledger").notNull(),
+    txHash: text("tx_hash").notNull(),
+    contract: text("contract").notNull(),
+    topic: text("topic").notNull(),
+    data: jsonb("data"),
+    ingestedAt: timestamp("ingested_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("chain_event_event_id_uq").on(t.eventId)],
+);
 
 export const reconciliationRun = pgTable("reconciliation_run", {
   id: uuid("id").primaryKey().defaultRandom(),
