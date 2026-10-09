@@ -234,3 +234,36 @@ describe("API-key requests through the server", () => {
     expect(audit[0]).toMatchObject({ action: "api_key.revoke" });
   });
 });
+
+describe("client address behind a proxy", () => {
+  const config: ApiConfig = {
+    port: 0, jwtSigningSecret: "test-signing-key",
+    sep10ServerSecret: "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    sep10HomeDomain: "localhost", sep10WebAuthDomain: "localhost",
+    networkPassphrase: "Test SDF Network ; September 2015",
+    webhookSecretKey: SECRET_KEY, apiKeySecretKey: SECRET_KEY, complianceEnforced: false, consoleOrigin: "http://localhost:5173",
+  };
+  const bad = (ip: string) => ({
+    "x-api-key": "bk_unknown", "x-signature": "00", "x-timestamp": NOW_S, "x-nonce": "nonce-eeeeeeeeeeeeeeee", "x-forwarded-for": ip,
+  });
+  const hammer = async (app: ReturnType<typeof buildServer>, ip: string) => {
+    let last = 0;
+    for (let i = 0; i < 32; i++) last = (await app.inject({ method: "GET", url: "/v1/positions?party=x", headers: bad(ip) })).statusCode;
+    return last;
+  };
+
+  it("with TRUST_PROXY, one abusive client is locked out without locking out anyone else", async () => {
+    const app = buildServer({ config: { ...config, trustProxy: true }, db: keyDb().db, contracts: {} as ContractClients });
+    expect(await hammer(app, "203.0.113.7")).toBe(429);
+    const other = await app.inject({ method: "GET", url: "/v1/positions?party=x", headers: bad("198.51.100.9") });
+    expect(other.statusCode).toBe(401); // refused for a bad key, not for being locked out
+  });
+
+  it("without it, X-Forwarded-For is ignored, so a client cannot choose its own address", async () => {
+    const app = buildServer({ config, db: keyDb().db, contracts: {} as ContractClients });
+    expect(await hammer(app, "203.0.113.7")).toBe(429);
+    // A different claimed address does not escape the lockout: they all look like the same caller.
+    const other = await app.inject({ method: "GET", url: "/v1/positions?party=x", headers: bad("198.51.100.9") });
+    expect(other.statusCode).toBe(429);
+  });
+});

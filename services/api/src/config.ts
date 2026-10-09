@@ -33,6 +33,12 @@ export interface ApiConfig {
   /** Whether the KYB and sanctions gate runs in front of risk-taking routes. On by default in
    * production; off elsewhere so local runs and tests need no network. */
   complianceEnforced: boolean;
+  /** Whether to believe `X-Forwarded-For` for the client address, and how many proxies to trust.
+   * `false` (default) ignores the header. Behind a reverse proxy (Render, Caddy, a load balancer)
+   * every request otherwise appears to come from the proxy, so the per-address rate limit and the
+   * failed-login lockout would be shared by all users. Set it only when a proxy you control sits in
+   * front: with no proxy, trusting the header lets any client pick its own address. */
+  trustProxy?: boolean | number | string;
   /** Origin allowed to call this API from a browser (the console app). Passed straight to
    * `@fastify/cors`'s `origin` option — never `*`. */
   consoleOrigin: string;
@@ -70,6 +76,15 @@ export function readSecret(name: string, env: NodeJS.ProcessEnv): string | undef
   }
 }
 
+/** `TRUST_PROXY`: `true`, a hop count (`1`), or a comma-separated list of proxy addresses/CIDRs. */
+export function parseTrustProxy(value: string | undefined): boolean | number | string {
+  const v = (value ?? "").trim();
+  if (v === "" || v === "false") return false;
+  if (v === "true") return true;
+  if (/^\d+$/.test(v)) return Number(v);
+  return v;
+}
+
 export function loadApiConfig(rawEnv: NodeJS.ProcessEnv = process.env): ApiConfig {
   // Secrets may come from NAME_FILE; resolve them once and let the rest of this function read `env`.
   const env: NodeJS.ProcessEnv = { ...rawEnv };
@@ -100,6 +115,7 @@ export function loadApiConfig(rawEnv: NodeJS.ProcessEnv = process.env): ApiConfi
     networkPassphrase: loadNetworkConfig(env).networkPassphrase,
     webhookSecretKey: env.WEBHOOK_SECRET_KEY ?? "",
     apiKeySecretKey: env.API_KEY_SECRET_KEY ?? "",
+    trustProxy: parseTrustProxy(env.TRUST_PROXY),
     complianceEnforced: env.COMPLIANCE_ENFORCED ? env.COMPLIANCE_ENFORCED === "true" : env.NODE_ENV === "production",
     consoleOrigin: env.CONSOLE_ORIGIN ?? "http://localhost:5173",
   };

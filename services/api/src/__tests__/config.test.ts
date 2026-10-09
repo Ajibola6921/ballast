@@ -70,3 +70,16 @@ describe("loadApiConfig", () => {
     expect(() => loadApiConfig({ ...rest, JWT_SIGNING_SECRET_FILE: "/nonexistent/secret" })).toThrowError(/JWT_SIGNING_SECRET_FILE/);
   });
 });
+
+import { parseTrustProxy } from "../config.js";
+
+describe("parseTrustProxy", () => {
+  it("is off unless asked for, and understands true, a hop count and a list", () => {
+    expect(parseTrustProxy(undefined)).toBe(false);
+    expect(parseTrustProxy("")).toBe(false);
+    expect(parseTrustProxy("false")).toBe(false);
+    expect(parseTrustProxy("true")).toBe(true);
+    expect(parseTrustProxy("1")).toBe(1);
+    expect(parseTrustProxy("10.0.0.0/8,172.16.0.0/12")).toBe("10.0.0.0/8,172.16.0.0/12");
+  });
+});

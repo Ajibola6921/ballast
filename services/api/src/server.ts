@@ -44,7 +44,11 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const contracts = options.contracts ?? getContractClients();
   const chain = options.chain ?? getChainGateway();
 
-  const app = Fastify({ logger: false });
+  const app = Fastify({
+    logger: false,
+    // A hop count (TRUST_PROXY=1) is accepted at runtime by Fastify but missing from its typings.
+    trustProxy: (config.trustProxy ?? false) as boolean | string,
+  });
 
   // Registered before auth: this is a pure JSON API (no HTML, so helmet's defaults are fine
   // as-is) that the console browser app calls cross-origin, so CORS must be locked to that one
