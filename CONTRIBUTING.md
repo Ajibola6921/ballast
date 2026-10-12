@@ -47,7 +47,43 @@ This is a pnpm + Turborepo monorepo:
 | `services/` | TypeScript backend services (`api`, `keeper`, `price-guard`, `issuer-gateway`, `indexer`, `ledger`, `margin-monitor`, `payout-hop`) |
 | `packages/` | Shared TypeScript packages (`db`, `domain-types`, `network-config`, `contract-clients`, `observability`, `operator-signing`) |
 | `apps/console/` | Borrower/lender web console (React) |
-| `scripts/` | `deploy.sh` and `e2e-smoke.sh` — real signed-transaction deploy and smoke test, local or testnet |
+| `scripts/` | Deploy (`deploy.sh`, `redeploy-price-guard.sh`, `deploy-mainnet-prices.sh`), local setup (`dev-setup.sh`), the e2e drills (`e2e-smoke.sh`, `e2e-services.sh`, `e2e-liquidation.sh`, `e2e-repo-margin.sh`), and the no-mock CI gate (`check-no-mocks.sh`). See `scripts/README.md` |
+| `deploy/` | Single-host production compose file and Caddyfile. See `deploy/README.md` |
+
+How the pieces fit together is in [`ARCHITECTURE.md`](ARCHITECTURE.md). Every service and package has
+its own `README.md` with its environment variables and tests.
+
+---
+
+## Which kind of contribution is it?
+
+You do not need the whole stack running for most changes.
+
+| You are changing | What you need |
+|---|---|
+| A contract | Rust and `cargo test --workspace` in `contracts/`. No network, no Docker |
+| A service or package's logic | Node, pnpm and `pnpm test`. Unit tests use test doubles and recorded fixtures |
+| The console | Node, pnpm and `pnpm --filter ./apps/console test` |
+| Docs | Nothing |
+| On-chain behaviour end to end | The full stack: Stellar CLI, Docker or Podman, a funded testnet deployment, `scripts/e2e-*.sh` |
+
+If the full stack misbehaves, check [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) first: testnet RPC is flaky
+and several failures are not bugs.
+
+---
+
+## Issues and labels
+
+Use the issue templates. Maintainers apply labels from [`.github/labels.yml`](.github/labels.yml):
+
+- `good first issue`: small, well-scoped, no live network needed.
+- `help wanted`: a PR would be welcome.
+- `area:*`: `contracts`, `services`, `packages`, `console`, `infra`.
+- `needs-testnet`: verifying it needs the deployed stack.
+- `security-adjacent`: touches signing, auth, pricing or fund movement and gets extra review. Real
+  vulnerabilities go through [SECURITY.md](SECURITY.md), never an issue.
+
+Comment on an issue before starting so two people do not do the same work. A PR should close one issue.
 
 ---
 
@@ -82,8 +118,9 @@ This is a pnpm + Turborepo monorepo:
 - **Secrets**: never hardcode a key, API key, or webhook secret. Add a new env var to
   `.env.example` (with a comment explaining what it's for) instead.
 - **Commits**: write a clear, specific subject line describing the change; add a body when the
-  *why* isn't obvious from the diff alone. This repo doesn't enforce a specific prefix convention
-  (no `feat:`/`fix:` requirement) — just be clear.
+  *why* isn't obvious from the diff alone. The history uses Conventional Commit style with a scope,
+  e.g. `fix(price-guard): evaluate on every publish`, `feat(api): webhook subscriptions`,
+  `docs: …`, `test(e2e): …`. Please match it. It is not enforced by tooling.
 
 ---
 
@@ -107,10 +144,14 @@ today.
 
 ```bash
 cd contracts
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace      # this is what CI runs
+cargo fmt --check           # not in CI, and currently fails on main (pre-existing diffs)
+cargo clippy --all-targets -- -D warnings   # not in CI
 ```
+
+CI only runs `cargo test`. `cargo fmt --check` already reports differences on `main`, so do not reformat
+whole files in an unrelated PR: format only the files you changed (`rustfmt <file>`), or send a
+formatting-only PR on its own. Wiring `fmt` and `clippy` into CI is an open task.
 
 To confirm a contract actually builds to wasm (needed before any deploy):
 
@@ -125,7 +166,8 @@ If you changed `packages/db/src/schema.ts`, generate a migration and commit it a
 schema change:
 
 ```bash
-pnpm --filter @ballast/db migrate
+pnpm --filter @ballast/db migrate:generate   # writes the SQL migration; commit it
+pnpm --filter @ballast/db migrate            # applies migrations to your local database
 ```
 
 ### End-to-end (`scripts/`)
