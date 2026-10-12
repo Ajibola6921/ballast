@@ -1,0 +1,64 @@
+# services/margin-monitor
+
+Polling worker that watches every open credit line and records when its margin state changes. It has no
+HTTP surface and sends no transactions, so it needs no operator key.
+
+Every poll it selects `credit_line` rows with status `open` and an on-chain `contract_line_id`, and for each
+one calls `CreditLine.ltv` (a read-only simulation). The LTV and state (`Healthy`, `Warning`, `MarginCall`,
+`Liquidation`, as the contract defines them) always come from the contract, never from off-chain arithmetic,
+so they match what a real liquidation would use. The result is compared with the line's latest
+`margin_event`; a line with no prior event counts as `Healthy`.
+
+On a change it inserts a `margin_event` (`from_state`, `to_state`, `ltv_bps`, and the newest `price_snapshot`
+for the first pledged asset of the line, if any) and logs it. Moving to `MarginCall` or `Liquidation` also
+fires a `margin_call` alert. An unchanged state writes nothing. A failure on one line is logged and the
+other lines are still checked.
+
+## How it connects to the rest
+
+- `services/api` has a webhook outbox that scans new `margin_event` rows and enqueues deliveries to
+  subscribers. This service does not call the API.
+- `services/keeper`'s `cure-expiry` job reads the latest `margin_event` to decide which lines to poke and
+  liquidate, and counts the cure window from these rows' timestamps. This service never liquidates.
+- `services/price-guard` writes the `price_snapshot` rows referenced by `margin_event`.
+
+## Run
+
+```
+pnpm dev                                          # from the repo root, with every other service
+pnpm --filter @ballast/service-margin-monitor dev # this service only (tsx watch)
+pnpm --filter @ballast/service-margin-monitor build && pnpm --filter @ballast/service-margin-monitor start
+```
+
+The repo-root `.env` is loaded automatically.
+
+## Environment
+
+- `DATABASE_URL`: Postgres.
+- `STELLAR_NETWORK`, `STELLAR_RPC_URL`, `STELLAR_HORIZON_URL`, `STELLAR_NETWORK_PASSPHRASE`: network.
+- `STELLAR_SIMULATION_SOURCE`: funded account the `ltv` simulation runs as. Required; it never signs.
+- `CREDIT_LINE_CONTRACT_ID`: required; startup fails without it.
+- `MARGIN_MONITOR_POLL_MS`: pause between polls, default `15000`. The next poll starts after the previous
+  one finishes plus this pause.
+- `ALERT_WEBHOOK_URL`, `ALERT_COOLDOWN_S`: optional delivery of the `margin_call` alert; it is always logged.
+
+## Source map
+
+- `src/index.ts`: startup, the polling loop, per-line error handling.
+- `src/monitor.ts`: `recomputeLine`, the read, compare and record step.
+
+## Tests
+
+`pnpm --filter @ballast/service-margin-monitor test` (vitest). `monitor.test.ts` uses a stubbed database
+query chain, a stubbed `CreditLineClient` and a spy alerter. It covers: no write when the state is
+unchanged; a `margin_event` plus alert on the move to `MarginCall`; a first event treated as coming from
+`Healthy`. The polling loop in `index.ts` is not covered. Test doubles live only in `*.test.ts`; `src` has
+no mock data.
+
+## Does not
+
+- Subscribe to price updates or chain events: it polls, so a state change is seen up to one interval late
+  (a code comment calls polling a stand-in until the indexer's `chain_event` stream can drive it).
+- Record a repeat of the same state, or distinguish a changed LTV within a state.
+- Check repo trades: repo margin is handled by `services/keeper`'s `repo-margin` job.
+- Send webhooks or call `liquidate`.
