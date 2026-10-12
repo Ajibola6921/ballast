@@ -1,0 +1,8 @@
+# Reviewers requested automatically. Contracts and the signing path get the closest look.
+*                                   @DevTobis
+/contracts/                         @DevTobis
+/packages/operator-signing/         @DevTobis
+/services/api/src/auth.ts           @DevTobis
+/services/api/src/session-token.ts  @DevTobis
+/services/price-guard/              @DevTobis
+/.github/                           @DevTobis

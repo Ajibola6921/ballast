@@ -1,0 +1,45 @@
+name: Feature or change proposal
+description: Propose new contract logic, a new service, an adapter, or a behaviour change. Open this before writing code.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - contracts (Soroban)
+        - services
+        - packages
+        - apps/console
+        - scripts / deploy
+        - docs
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't be done today, or what is wrong with how it is done?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: |
+        For contract changes, say which invariant in contracts/AUDIT_NOTES.md it touches and whether it
+        changes a function signature (that breaks deployed callers and the scripts that use them).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This does not require mock or fake data in shipped code
+          required: true
+        - label: I am willing to work on this

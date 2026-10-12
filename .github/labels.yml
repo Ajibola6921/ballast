@@ -1,0 +1,20 @@
+# Label set for this repo. Apply with the GitHub CLI (idempotent):
+#
+#   yq -r '.[] | [.name, .color, .description] | @tsv' .github/labels.yml |
+#     while IFS=$'\t' read -r n c d; do gh label create "$n" --color "$c" --description "$d" --force; done
+#
+# Meanings are described in CONTRIBUTING.md "Issues and labels".
+
+- { name: bug,                 color: d73a4a, description: "Something is broken" }
+- { name: enhancement,         color: a2eeef, description: "New behaviour or a change to existing behaviour" }
+- { name: documentation,       color: 0075ca, description: "Docs only" }
+- { name: needs-triage,        color: ededed, description: "Not yet looked at by a maintainer" }
+- { name: good first issue,    color: 7057ff, description: "Small, well-scoped, no live network needed" }
+- { name: help wanted,         color: 008672, description: "Maintainers would welcome a PR" }
+- { name: area:contracts,      color: 5319e7, description: "Soroban contracts (Rust)" }
+- { name: area:services,       color: 1d76db, description: "Backend services" }
+- { name: area:packages,       color: 0e8a16, description: "Shared TypeScript packages" }
+- { name: area:console,        color: fbca04, description: "Web console" }
+- { name: area:infra,          color: bfdadc, description: "Scripts, CI, deploy" }
+- { name: needs-testnet,       color: f9d0c4, description: "Verifying it needs the deployed stack or a funded testnet account" }
+- { name: security-adjacent,   color: b60205, description: "Touches signing, auth, pricing or fund movement; extra review. Real vulnerabilities go through SECURITY.md, not an issue" }
