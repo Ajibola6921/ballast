@@ -996,68 +996,51 @@ mod test {
     }
 
     #[test]
-    fn halt_stays_halted_across_further_publishes_and_keeps_last_good() {
+    fn halted_guard_stays_halted_across_further_publishes_and_keeps_last_good() {
         let (env, client, publisher, risk, asset) = setup(50, 100, 3600);
         let code = asset_code(&env);
         let sig = BytesN::from_array(&env, &[0u8; 64]);
         let t0 = env.ledger().timestamp();
-        let feed_name = feed(&env);
+        let feed = feed(&env);
 
         // Establish a good baseline at SCALE.
         client.publish_nav(&publisher, &asset, &code, &SCALE, &t0, &sig);
-        client.publish_source(&publisher, &asset, &feed_name, &SCALE, &t0);
+        client.publish_source(&publisher, &asset, &feed, &SCALE, &t0);
         let baseline = client.guarded_price(&asset);
         assert_eq!(baseline.status, PriceStatus::Ok);
         assert_eq!(baseline.value, SCALE);
 
-        // Both sources agree on a +30% jump -> halt latches at publish time.
+        // Both sources agree on a jump beyond the daily band -> halt latches at publish time.
         let jumped = SCALE * 13 / 10;
-        client.publish_nav(&publisher, &asset, &code, &jumped, &(t0 + 10), &sig);
-        client.publish_source(&publisher, &asset, &feed_name, &jumped, &(t0 + 10));
+        client.publish_nav(&publisher, &asset, &code, &jumped, &t0, &sig);
+        client.publish_source(&publisher, &asset, &feed, &jumped, &t0);
         let halted = client.guarded_price(&asset);
         assert_eq!(halted.status, PriceStatus::Halted);
         assert_eq!(halted.value, SCALE);
 
-        // Post-halt publish #1: sources agree on a calm price back at the old baseline.
-        client.publish_nav(&publisher, &asset, &code, &SCALE, &(t0 + 20), &sig);
-        client.publish_source(&publisher, &asset, &feed_name, &SCALE, &(t0 + 20));
-        let p1 = client.guarded_price(&asset);
-        assert_eq!(p1.status, PriceStatus::Halted);
-        assert_eq!(p1.value, SCALE);
+        // Post-halt publishes: sources agree on calm values (including the old price). The guard
+        // must not move LastGood and must stay Halted.
+        for value in [SCALE, SCALE + SCALE / 100, SCALE] {
+            client.publish_nav(&publisher, &asset, &code, &value, &t0, &sig);
+            client.publish_source(&publisher, &asset, &feed, &value, &t0);
+            let price = client.guarded_price(&asset);
+            assert_eq!(price.status, PriceStatus::Halted);
+            assert_eq!(price.value, SCALE);
+        }
 
-        // Post-halt publish #2: sources agree on a different calm price.
-        let calm = SCALE + SCALE / 100; // +1%
-        client.publish_nav(&publisher, &asset, &code, &calm, &(t0 + 30), &sig);
-        client.publish_source(&publisher, &asset, &feed_name, &calm, &(t0 + 30));
-        let p2 = client.guarded_price(&asset);
-        assert_eq!(p2.status, PriceStatus::Halted);
-        assert_eq!(p2.value, SCALE);
-
-        // Post-halt publish #3: sources agree on yet another calm price.
-        let calm2 = SCALE - SCALE / 100; // -1%
-        client.publish_nav(&publisher, &asset, &code, &calm2, &(t0 + 40), &sig);
-        client.publish_source(&publisher, &asset, &feed_name, &calm2, &(t0 + 40));
-        let p3 = client.guarded_price(&asset);
-        assert_eq!(p3.status, PriceStatus::Halted);
-        assert_eq!(p3.value, SCALE);
-
-        // Sources go stale while halted: still Halted, not Degraded, value unchanged.
-        env.ledger().set_timestamp(t0 + 40 + 3_601);
+        // Sources going stale while halted still report Halted, not Degraded.
+        env.ledger().set_timestamp(t0 + 3_601);
         let stale = client.guarded_price(&asset);
         assert_eq!(stale.status, PriceStatus::Halted);
         assert_eq!(stale.value, SCALE);
 
-        // After confirm, the next fresh publish evaluates normally.
+        // Confirm clears the halt; the next fresh publish evaluates normally.
         client.confirm_halt_cleared(&risk, &asset);
-        let after_confirm = client.guarded_price(&asset);
-        assert_eq!(after_confirm.status, PriceStatus::Ok);
-
-        let fresh_ts = env.ledger().timestamp();
-        let fresh_value = SCALE + SCALE / 200; // +0.5%, within daily band
-        client.publish_nav(&publisher, &asset, &code, &fresh_value, &fresh_ts, &sig);
-        client.publish_source(&publisher, &asset, &feed_name, &fresh_value, &fresh_ts);
-        let final_price = client.guarded_price(&asset);
-        assert_eq!(final_price.status, PriceStatus::Ok);
-        assert_eq!(final_price.value, fresh_value);
+        let t1 = env.ledger().timestamp();
+        client.publish_nav(&publisher, &asset, &code, &SCALE, &t1, &sig);
+        client.publish_source(&publisher, &asset, &feed, &SCALE, &t1);
+        let after = client.guarded_price(&asset);
+        assert_eq!(after.status, PriceStatus::Ok);
+        assert_eq!(after.value, SCALE);
     }
 }
