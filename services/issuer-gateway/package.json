@@ -5,9 +5,9 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "build": "tsc -b",
-    "dev": "tsx watch --env-file-if-exists=../../.env src/index.ts",
-    "start": "node --env-file-if-exists=../../.env dist/index.js",
+    "build": "node init && tsc -b",
+    "dev": "node init && tsx watch --env-file-if-exists=../../.env src/index.ts",
+    "start": "node init && node --env-file-if-exists=../../.env dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "lint": "echo 'no lint configured'"
