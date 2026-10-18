@@ -1601,4 +1601,6 @@ mod test {
         assert_eq!(next_price.status, PriceStatus::Ok);
         assert_eq!(next_price.value, SCALE);
     }
+
+    mod invariants;
 }
