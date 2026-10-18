@@ -480,6 +480,63 @@ mod test {
     }
 
     #[test]
+    fn pause_rejects_a_stranger_authorising_only_themselves() {
+        use soroban_sdk::testutils::MockAuth;
+        use soroban_sdk::testutils::MockAuthInvoke;
+        use soroban_sdk::IntoVal;
+
+        let (env, client, ..) = setup();
+        let stranger = Address::generate(&env);
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "pause",
+                args: (&stranger, PauseScope::Draws).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(client.try_pause(&stranger, &PauseScope::Draws).is_err());
+        assert!(!client.is_paused(&PauseScope::Draws));
+    }
+
+    #[test]
+    fn pause_all_pauses_every_scope() {
+        let (env, client, ..) = setup();
+        for scope in [
+            PauseScope::Pledges,
+            PauseScope::Draws,
+            PauseScope::Exits,
+            PauseScope::Repos,
+        ] {
+            assert!(!client.is_paused(&scope));
+        }
+
+        client.pause(&client_pauser(&env, &client), &PauseScope::All);
+
+        for scope in [
+            PauseScope::Pledges,
+            PauseScope::Draws,
+            PauseScope::Exits,
+            PauseScope::Repos,
+        ] {
+            assert!(client.is_paused(&scope));
+        }
+    }
+
+    #[test]
+    fn pausing_twice_is_idempotent() {
+        let (env, client, ..) = setup();
+        let pauser = client_pauser(&env, &client);
+
+        client.pause(&pauser, &PauseScope::Exits);
+        client.pause(&pauser, &PauseScope::Exits);
+
+        assert!(client.is_paused(&PauseScope::Exits));
+    }
+
+    #[test]
     fn state_remains_accessible_across_sequence_advancement() {
         let (env, client, admin, _risk, asset) = setup();
 
