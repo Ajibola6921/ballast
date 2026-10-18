@@ -36,17 +36,19 @@ enum DataKey {
     PendingUnpause(u64),
 }
 
+// Per-asset configs live in persistent storage, one entry each, so the instance entry that every
+// call loads does not grow with the number of registered assets.
 fn read_asset(env: &Env, asset: &Address) -> AssetConfig {
     env.storage()
-        .instance()
+        .persistent()
         .get(&DataKey::Asset(asset.clone()))
         .expect("registry: asset not registered")
 }
 
 fn write_asset(env: &Env, asset: &Address, config: &AssetConfig) {
-    env.storage()
-        .instance()
-        .set(&DataKey::Asset(asset.clone()), config);
+    let key = DataKey::Asset(asset.clone());
+    env.storage().persistent().set(&key, config);
+    ttl::extend_persistent(env, &key);
 }
 
 #[contract]
@@ -87,7 +89,7 @@ impl Registry {
         access::require_admin(&env);
         ttl::extend_instance(&env);
         assert!(
-            !env.storage().instance().has(&DataKey::Asset(asset.clone())),
+            !env.storage().persistent().has(&DataKey::Asset(asset.clone())),
             "registry: asset already registered"
         );
         if let Err(message) = config.validate(&env, &asset) {
@@ -97,7 +99,9 @@ impl Registry {
     }
 
     pub fn asset(env: Env, asset: Address) -> AssetConfig {
-        read_asset(&env, &asset)
+        let config = read_asset(&env, &asset);
+        ttl::extend_persistent(&env, &DataKey::Asset(asset));
+        config
     }
 
     /// Queues a change to an already-registered asset's parameters, executable after the 48h
@@ -270,6 +274,7 @@ impl Registry {
 mod test {
     use super::*;
     use ballast_common::asset::{AssetStandard, CustodyMode, YieldType};
+    use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
     use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::{symbol_short, Symbol};
 
@@ -558,6 +563,43 @@ mod test {
         });
         client.execute_param(&id);
 
+        assert_eq!(client.asset(&asset).haircut_base_bps, 400);
+    }
+
+    #[test]
+    fn asset_config_lives_in_persistent_storage_with_extended_ttl() {
+        let (env, client, admin, _risk, asset) = setup();
+
+        env.as_contract(&client.address, || {
+            let key = DataKey::Asset(asset.clone());
+            assert!(env.storage().persistent().has(&key));
+            assert!(!env.storage().instance().has(&key));
+            assert_eq!(
+                env.storage().persistent().get_ttl(&key),
+                ballast_common::ttl::PERSISTENT_EXTEND_TO_LEDGERS
+            );
+            assert_eq!(
+                env.storage().instance().get_ttl(),
+                ballast_common::ttl::INSTANCE_EXTEND_TO_LEDGERS
+            );
+        });
+
+        // Once less than the threshold remains, a read inside a transaction pushes the TTL back out.
+        env.ledger().with_mut(|l| l.sequence_number += 505_000);
+        assert_eq!(client.asset(&asset).haircut_base_bps, 300);
+        env.as_contract(&client.address, || {
+            assert_eq!(
+                env.storage().persistent().get_ttl(&DataKey::Asset(asset.clone())),
+                ballast_common::ttl::PERSISTENT_EXTEND_TO_LEDGERS
+            );
+        });
+
+        // A queued change still executes after the timelock, and the write keeps the entry alive.
+        let id = client.queue_param(&admin, &asset, &ParamChange::HaircutBaseBps(400));
+        env.ledger().with_mut(|l| {
+            l.timestamp += ballast_common::timelock::TIMELOCK_DELAY_SECONDS + 1;
+        });
+        client.execute_param(&id);
         assert_eq!(client.asset(&asset).haircut_base_bps, 400);
     }
 
