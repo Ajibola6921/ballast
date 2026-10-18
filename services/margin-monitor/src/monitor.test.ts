@@ -182,6 +182,7 @@ describe("recomputeLine", () => {
         expect.objectContaining({ priceSnapshotId: null }),
       );
     });
+  });
 
   it("records a margin_event on recovery to Healthy without firing an alert", async () => {
     const db = makeDb([
